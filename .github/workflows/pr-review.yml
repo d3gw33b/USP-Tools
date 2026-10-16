@@ -23,6 +23,8 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_USER: ${{ github.event.pull_request.user.login }}
+          SENDER: ${{ github.event.sender.login }}
+          SENDER_AVATAR: ${{ github.event.sender.avatar_url }}
         run: |
           if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_MODS is not set; skipping."; exit 0; fi
           files=$(gh api --paginate "repos/$REPO/pulls/$PR_NUM/files?per_page=100" | jq -s 'add')
@@ -45,7 +47,8 @@ jobs:
           case $worst in 0) verdict="🟢 Nothing flagged. Normal code change.";; 1) verdict="🟡 Probably fine, worth a look.";; 2) verdict="🟠 Needs a careful look.";; *) verdict="🔴 Don't merge until the red items are explained.";; esac
           [ -z "$flags" ] && flags=$'\n'"🟢 Only ordinary code or text files changed."
           top=$(jq -r 'sort_by(-(.additions+.deletions)) | .[:8][] | "• `\(.filename)` +\(.additions) −\(.deletions) (\(.status))"' <<<"$files")
-          content=$(printf '**%s** · pull request #%s (%s) by %s\n**%s**\n<%s>\n\n**Automatic check:** %s%s\n\n**Size:** %s file(s), +%s −%s\n%s\n\nMods: react ✅ good · ➖ neutral · ❌ bad, and discuss in a thread. The GitHub manager makes the final call.' \
-            "$REPO" "$PR_NUM" "$ACTION" "$PR_USER" "${PR_TITLE:0:200}" "$PR_URL" "$verdict" "$flags" "$nfiles" "$add" "$del" "$top")
-          jq -n --arg c "${content:0:1990}" '{content: $c, allowed_mentions: {parse: []}}' \
-            | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK"
+          case $worst in 0) COLOR=3066993;; 1) COLOR=16776960;; 2) COLOR=15105570;; *) COLOR=15158332;; esac
+          TITLE="[$REPO] Pull request $ACTION: #$PR_NUM $PR_TITLE (by $PR_USER)"
+          URL=$PR_URL
+          DESC=$(printf '**Automatic check:** %s%s\n\n**Size:** %s file(s), +%s −%s\n%s\n\nMods: react ✅ good · ➖ neutral · ❌ bad, discuss in a thread. The GitHub manager makes the final call.' "$verdict" "$flags" "$nfiles" "$add" "$del" "$top")
+          jq -n --arg t "${TITLE:0:250}" --arg u "$URL" --arg d "${DESC:0:4000}" --argjson c "$COLOR" --arg an "$SENDER" --arg ai "$SENDER_AVATAR" --arg au "https://github.com/$SENDER" '{username: "GitHub", avatar_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png", allowed_mentions: {parse: []}, embeds: [{author: {name: $an, icon_url: $ai, url: $au}, title: $t, url: $u, description: $d, color: $c}]}' | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
