@@ -36,3 +36,4 @@ __pycache__/
 apikey*
 # The live bot's local secrets
 bot.env
+bot.log

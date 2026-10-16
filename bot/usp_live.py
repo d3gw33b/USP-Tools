@@ -3,13 +3,14 @@
 
 Run it on any computer that stays on:  python usp_live.py
 To check it connects and then stop:    python usp_live.py --for 90
+To stop a copy that's running:          python usp_live.py --stop
 It reads DISCORD_BOT_TOKEN, DISCORD_OWNER_IDS and DISCORD_CHANNEL_IDS from the environment, or from a
 file called bot.env next to this one (one KEY=value per line). Never commit bot.env.
 
 While it runs, the 15-minute GitHub check stands back. When it stops, the GitHub check takes over again.
 Standard library only.
 """
-import _thread, base64, json, os, queue, random, socket, ssl, struct, sys, threading, time
+import base64, json, os, queue, random, socket, ssl, struct, sys, threading, time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import usp_bot as B
@@ -234,8 +235,12 @@ class Live:
                 print(f"Something failed ({type(e).__name__}: {e}); carrying on.")
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+LOCK_PORT = 47613  # a local port held while the bot runs, so only one copy runs and --stop can reach it
+
+
 def load_env_file():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.env")
+    path = os.path.join(HERE, "bot.env")
     if not os.path.exists(path):
         return
     for line in open(path, encoding="utf-8-sig"):
@@ -245,33 +250,74 @@ def load_env_file():
             os.environ.setdefault(k.strip(), v.strip().strip('"'))
 
 
+def hold_lock(stop):
+    s = socket.socket()
+    try:
+        s.bind(("127.0.0.1", LOCK_PORT))
+    except OSError:
+        return None
+    s.listen(1)
+
+    def serve():
+        while not stop.is_set():
+            c, _ = s.accept()
+            with c:
+                if c.recv(16) == b"stop":
+                    stop.set()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return s
+
+
+def connect_loop(live, events, stop):
+    wait = 1
+    while not stop.is_set():
+        started = time.time()
+        try:
+            gateway(os.environ["DISCORD_BOT_TOKEN"], events, live.online)
+            print("Reconnecting...")
+        except Closed as e:
+            if e.code in FATAL:
+                print(f"Stopped: {FATAL[e.code]}.")
+                stop.set()
+                return
+            print(f"Connection dropped ({e.code}); reconnecting.")
+        except (OSError, ConnectionError, ValueError) as e:
+            print(f"Connection problem ({type(e).__name__}); retrying.")
+        wait = 1 if time.time() - started > 60 else min(wait * 2, 60)
+        stop.wait(wait)
+
+
 def main():
+    if sys.stdout is None:  # started hidden (pythonw): write a log next to this file instead
+        sys.stdout = sys.stderr = open(os.path.join(HERE, "bot.log"), "a", encoding="utf-8", buffering=1)
+    if "--stop" in sys.argv:
+        try:
+            socket.create_connection(("127.0.0.1", LOCK_PORT), timeout=3).sendall(b"stop")
+            print("Told the running bot to stop.")
+        except OSError:
+            print("The bot isn't running.")
+        return
     load_env_file()
     cfg = B.env_config()
     if not cfg:
         print("Missing DISCORD_BOT_TOKEN, DISCORD_OWNER_IDS or DISCORD_CHANNEL_IDS (put them in bot.env).")
         sys.exit(1)
+    stop = threading.Event()
+    lock = hold_lock(stop)
+    if lock is None:
+        print("The bot is already running on this computer.")
+        return
+    print(time.strftime("%Y-%m-%d %H:%M ") + "Starting the bot.")
     if "--for" in sys.argv:  # run for a while, then stop cleanly (used by the bot-live-check workflow)
-        threading.Timer(float(sys.argv[sys.argv.index("--for") + 1]), _thread.interrupt_main).start()
+        threading.Timer(float(sys.argv[sys.argv.index("--for") + 1]), stop.set).start()
     live = Live(cfg)
     events = queue.Queue()
     threading.Thread(target=live.work, args=(events,), daemon=True).start()
-    wait = 1
+    threading.Thread(target=connect_loop, args=(live, events, stop), daemon=True).start()
     try:
-        while True:
-            started = time.time()
-            try:
-                gateway(os.environ["DISCORD_BOT_TOKEN"], events, live.online)
-                print("Reconnecting...")
-            except Closed as e:
-                if e.code in FATAL:
-                    print(f"Stopped: {FATAL[e.code]}.")
-                    break
-                print(f"Connection dropped ({e.code}); reconnecting.")
-            except (OSError, ConnectionError, ValueError) as e:
-                print(f"Connection problem ({type(e).__name__}); retrying.")
-            wait = 1 if time.time() - started > 60 else min(wait * 2, 60)
-            time.sleep(wait)
+        while not stop.wait(1):
+            pass
     except KeyboardInterrupt:
         pass
     live.settings["live"] = False  # hand back to the GitHub check straight away

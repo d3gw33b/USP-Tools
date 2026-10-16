@@ -38,14 +38,15 @@ Type `!usp help` in Discord for the commands.
 ## Online and instant: `usp_live.py`
 
 1. Install Python 3.11 or newer.
-2. Put a file called `bot.env` next to `usp_live.py` with the same three values as the secrets:
+2. Copy `bot.env.example` to `bot.env` (next to `usp_live.py`) and fill in the same three values as the secrets:
    ```
    DISCORD_BOT_TOKEN=...
    DISCORD_OWNER_IDS=...
    DISCORD_CHANNEL_IDS=mod=...,voting=...,settings=...
    ```
    `bot.env` is in `.gitignore`. Never commit it.
-3. Run `python usp_live.py`. The bot shows as online, answers commands instantly and decides votes the moment the
+3. Run `python usp_live.py` (on Windows, double-click `start-bot.bat`). The bot shows as online, answers commands instantly and decides votes the moment the
    last voter reacts. Close it and the 15-minute check takes over again within about 3 minutes.
 
-Run only one copy at a time.
+On Windows, `autostart-on.bat` runs it in the background now and at every login (log in `bot.log`), and
+`autostart-off.bat` stops it and turns that off. Only one copy runs per computer; `python usp_live.py --stop` stops it.
