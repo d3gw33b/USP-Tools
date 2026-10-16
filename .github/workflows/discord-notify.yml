@@ -1,0 +1,45 @@
+# Posts pushes to main and pull request activity into Discord (#github-other-repos).
+# Needs the repo secret DISCORD_WEBHOOK_OTHER (the channel's webhook URL). Skips quietly if it is not set.
+# pull_request_target is used so pull requests from forks are announced too. It never checks out or runs
+# their code; it only reads the title and link, passed as data.
+name: discord-notify
+on:
+  push:
+    branches: [main]
+  pull_request_target:
+    types: [opened, reopened, closed, ready_for_review]
+permissions: {}
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_OTHER }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          COMPARE: ${{ github.event.compare }}
+          COMMITS: ${{ toJSON(github.event.commits) }}
+          FORCED: ${{ github.event.forced }}
+          ACTION: ${{ github.event.action }}
+          MERGED: ${{ github.event.pull_request.merged }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_USER: ${{ github.event.pull_request.user.login }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then echo "DISCORD_WEBHOOK_OTHER is not set; skipping."; exit 0; fi
+          if [ "$EVENT" = push ]; then
+            n=$(jq 'length' <<<"$COMMITS")
+            list=$(jq -r '.[-10:][] | "• `\(.id[0:7])` \(.message | split("\n")[0] | .[0:100]) (\(.author.name))"' <<<"$COMMITS")
+            head="**$REPO** · \`main\` · $n new commit(s) by $ACTOR"
+            [ "$FORCED" = "true" ] && head="$head ⚠️ **force-pushed**"
+            content=$(printf '%s\n%s\n<%s>' "$head" "$list" "$COMPARE")
+          else
+            what=$ACTION
+            [ "$ACTION" = closed ] && { [ "$MERGED" = true ] && what=merged || what="closed without merging"; }
+            content=$(printf '**%s** · pull request #%s %s by %s\n%s\n<%s>' "$REPO" "$PR_NUM" "$what" "$PR_USER" "${PR_TITLE:0:200}" "$PR_URL")
+          fi
+          jq -n --arg c "${content:0:1990}" '{content: $c, allowed_mentions: {parse: []}}' \
+            | curl -fsS -H 'Content-Type: application/json' -d @- "$WEBHOOK"
