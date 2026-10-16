@@ -23,6 +23,8 @@ Settings are kept in a readable card the bot pins in the settings channel. Chang
 | very large | more | 48 h | both owners ✅ |
 
 Changes to `.github` count as very large. License/rules/README changes and binary-looking files count as at least large.
+Pull requests opened by an owner skip the vote: the card is posted for information only. The repository owner always
+counts as an owner; add more GitHub accounts with `!usp github-owners add <name>`.
 An owner's ❌ is a veto at any tier. A vote ends when every voter has voted or the timer runs out.
 The bot never merges. An owner merges or closes on GitHub.
 

@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     },
     "model": "gemma",
     "ping_here": False,
+    "github_owners": [],  # GitHub accounts whose pull requests skip the vote (the repo's owner always does)
     "cursor": 0,   # commands up to this time (ms) are handled; shown as the settings card's timestamp
     "live": False,  # whether the live bot (usp_live.py) saved it last
 }
@@ -55,8 +56,9 @@ DEFAULT_SETTINGS = {
 TIER_MODE = {"tiny": "lazy", "small": "lazy", "medium": "democratic", "large": "owner1", "very_large": "owner2"}
 TIER_NAME = {"tiny": "Tiny", "small": "Small", "medium": "Medium", "large": "Large", "very_large": "Very large"}
 MODE_NAME = {"lazy": "Passes unless voted down", "democratic": "Majority vote",
-             "owner1": "One owner must approve", "owner2": "Both owners must approve"}
-STATE_NAME = {"open": "Open", "approved": "Approved", "rejected": "Rejected", "expired": "Expired", "superseded": "Superseded"}
+             "owner1": "One owner must approve", "owner2": "Both owners must approve", "none": "No vote needed"}
+STATE_NAME = {"open": "Open", "approved": "Approved", "rejected": "Rejected", "expired": "Expired", "superseded": "Superseded",
+              "owner": "Owner's change"}
 MODE_RANK = {"lazy": 0, "democratic": 1, "owner1": 2, "owner2": 3}
 
 # Free models that run on the GitHub machine itself (no key, nothing leaves GitHub).
@@ -176,7 +178,9 @@ def settings_embed(s):
     fields = [{"name": "Voters" if i == 0 else "Voters (more)", "value": c} for i, c in enumerate(chunks)]
     fields += [{"name": "Size tiers", "value": "\n".join(tier_line(s, t) for t in TIER_ORDER)},
                {"name": "AI model", "value": f"`{s['model']}`", "inline": True},
-               {"name": "@here in mod chat", "value": "On" if s["ping_here"] else "Off", "inline": True}]
+               {"name": "@here in mod chat", "value": "On" if s["ping_here"] else "Off", "inline": True},
+               {"name": "Owner GitHub accounts (no vote needed)",
+                "value": " ".join(f"`{g}`" for g in s["github_owners"]) or "Only the repository owner. Add more with `!usp github-owners add <name>`."}]
     return {"title": SETTINGS_TITLE, "color": 0x5865F2, "fields": fields,
             "description": "Change these with `!usp` commands. `!usp help` lists them.",
             "footer": {"text": "🟢 Online, replies instantly · last check" if s.get("live") else "Checks every 15 minutes · last check"},
@@ -196,6 +200,7 @@ def parse_settings(e):
     if "AI model" in f:
         s["model"] = f["AI model"].strip("` ")
     s["ping_here"] = f.get("@here in mod chat", "Off").strip().lower() == "on"
+    s["github_owners"] = re.findall(r"`([A-Za-z0-9-]+)`", f.get("Owner GitHub accounts (no vote needed)", ""))
     s["cursor"] = from_iso(e["timestamp"]) if e.get("timestamp") else 0
     s["live"] = (e.get("footer") or {}).get("text", "").startswith("🟢")
     return s
@@ -423,7 +428,7 @@ def label(repo, pr):
 
 
 def footer(st):
-    ends = "Vote ends" if st["state"] == "open" else "Vote ended"
+    ends = {"open": "Vote ends", "owner": "Posted"}.get(st["state"], "Vote ended")
     return " · ".join([label(st["repo"], st["pr"]), TIER_NAME[st["tier"]], MODE_NAME[st["mode"]], STATE_NAME[st["state"]], ends])
 
 
@@ -454,7 +459,7 @@ MODE_TEXT = {"lazy": "passes when the timer ends unless more voters say ❌ than
              "democratic": "majority of the votes cast decides",
              "owner1": "needs one owner's ✅ (and no owner ❌)",
              "owner2": "needs both owners' ✅"}
-COLOR = {"open": 0x3498DB, "approved": 0x2ECC71, "rejected": 0xE74C3C, "superseded": 0x95A5A6, "expired": 0x95A5A6}
+COLOR = {"open": 0x3498DB, "approved": 0x2ECC71, "owner": 0x2ECC71, "rejected": 0xE74C3C, "superseded": 0x95A5A6, "expired": 0x95A5A6}
 
 
 def ts(epoch):
@@ -497,14 +502,18 @@ def cmd_card():
 
     now = now_ms() // 1000
     hours = float(settings["tiers"][tier]["hours"])
+    author = pr["user"]["login"]
+    by_owner = author.lower() in {g.lower() for g in settings["github_owners"] + [os.environ.get("GITHUB_REPOSITORY_OWNER", "")] if g}
     st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + int(hours * 3600), "state": "open"}
+    if by_owner:
+        st.update(mode="none", state="owner", deadline=now)
 
     # retire older cards for the same pull request
     for m in dc("GET", f"/channels/{cfg['ch']['voting']}/messages?limit=100"):
         if m["author"]["id"] != me or not m.get("embeds"):
             continue
         old = parse_card(m["embeds"][0])
-        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] == "open":
+        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] in ("open", "owner"):
             old["state"] = "superseded"
             e = m["embeds"][0]
             stamp_card(e, old)
@@ -515,9 +524,12 @@ def cmd_card():
     desc = f"**Automatic check**\n{risk}\n\n"
     if summary:
         desc += f"**AI summary**\n{summary}\n\n{DISCLAIMER}\n\n"
-    desc += (f"**Size:** {len(files)} file(s), +{add} −{dele} → **{tier.replace('_', ' ')}**\n"
-             f"**How it's decided:** {MODE_TEXT[mode]}. Vote ends {ts(st['deadline'])} or when everyone has voted.\n"
-             f"Vote with {YES} good · {MEH} neutral · {NO} bad (one reaction each).")
+    desc += f"**Size:** {len(files)} file(s), +{add} −{dele} → **{tier.replace('_', ' ')}**\n"
+    if by_owner:
+        desc += "**No vote needed:** an owner made this change. This card is for information."
+    else:
+        desc += (f"**How it's decided:** {MODE_TEXT[mode]}. Vote ends {ts(st['deadline'])} or when everyone has voted.\n"
+                 f"Vote with {YES} good · {MEH} neutral · {NO} bad (one reaction each).")
     embed = {
         "author": {"name": pr["user"]["login"], "icon_url": pr["user"]["avatar_url"], "url": pr["user"]["html_url"]},
         "title": f"[{repo}] Pull request #{num}: {pr['title']}"[:256],
@@ -527,10 +539,15 @@ def cmd_card():
     if model_note:
         embed["fields"] = [{"name": "Model", "value": model_note[:200], "inline": True}]
     card = dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {"embeds": [embed], "allowed_mentions": {"parse": []}})
-    for emo in (YES, MEH, NO):
+    for emo in (() if by_owner else (YES, MEH, NO)):
         dc("PUT", f"/channels/{cfg['ch']['voting']}/messages/{card['id']}/reactions/{urllib.parse.quote(emo)}/@me")
     guild = dc("GET", f"/channels/{cfg['ch']['voting']}").get("guild_id")
     link = f"https://discord.com/channels/{guild}/{cfg['ch']['voting']}/{card['id']}"
+    if by_owner:
+        dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
+            "content": f"📝 Owner change, no vote needed: **{short(repo, num)}** → {link}", "allowed_mentions": {"parse": []}})
+        print("Card posted (owner's change, no vote).")
+        return
     here = "@here " if settings.get("ping_here") else ""
     dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
         "content": f"{here}🗳️ New vote: **{short(repo, num)}** ({tier.replace('_', ' ')}) → {link}",
@@ -561,6 +578,7 @@ Owners only:
 • `!usp model set gemma`: simple names `gemma`, `gemma-small`, `qwen`, `llama`, `gemini`, `off`
 • `!usp model set gemma-3-1b` / `hf:owner/repo/file.gguf` / `gemini-2.5-flash`: exact model
 • `!usp ping here on|off`: @here in mod chat for new votes (off by default)
+• `!usp github-owners add <github-name>`: that account's pull requests skip the vote (the repo owner always does)
 `usp#N` is a USP pull request, `tools#N` a USP-tools one. Reactions count only from listed voters and owners, one each.
 Gemini runs on Google's servers and needs a GEMINI_API_KEY secret; its free tier may use what it reads. The others run on GitHub's machine for free."""
 
@@ -726,6 +744,19 @@ def handle_command(cfg, settings, cards, msg, now):
         settings["model"] = name.strip()
         note = " Gemini needs a GEMINI_API_KEY secret and sends the change to Google." if resolve_model(name)["kind"] == "gemini" else ""
         return f"Model set to `{settings['model']}` for new votes.{note}"
+    if w[0] == "github-owners":
+        if len(w) == 1 or w[1] == "list":
+            return "Pull requests from these GitHub accounts skip the vote: " + (", ".join(f"`{g}`" for g in settings["github_owners"])
+                    or "none added") + ". The repository owner always does."
+        if not is_owner:
+            return only_owners
+        names = [n for n in words[2:] if re.fullmatch(r"[A-Za-z0-9-]{1,39}", n)]
+        if w[1] not in ("add", "remove") or not names:
+            return "Use `!usp github-owners add <github-name>` or `remove <github-name>`."
+        low = {n.lower() for n in names}
+        keep = [g for g in settings["github_owners"] if g.lower() not in low]
+        settings["github_owners"] = keep + (names if w[1] == "add" else [])
+        return "Owner GitHub accounts now: " + (", ".join(f"`{g}`" for g in settings["github_owners"]) or "only the repository owner")
     if w[0] == "ping" and len(w) >= 3 and w[1] == "here":
         if not is_owner:
             return only_owners
