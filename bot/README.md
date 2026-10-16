@@ -36,7 +36,14 @@ The bot never merges. An owner merges or closes on GitHub.
 - `DISCORD_CHANNEL_IDS`: `mod=<id>,voting=<id>,settings=<id>`.
 - `GEMINI_API_KEY`: optional, only for Gemini models.
 
-Type `!usp help` in Discord for the commands.
+The bot keeps a pinned help card with every command in the settings channel and updates it when the bot changes.
+
+## Override
+
+Owners can change how votes are decided without touching the defaults, and switch it off again:
+`!usp override <size> <how>` with sizes `small`, `medium`, `large`, `huge`, `all`, `owners`, and how `auto`, `easy`,
+`vote`, `owner` or `both`. `!usp override medium time 1h` sets a different timer. `!usp override off` or `on` pauses or
+resumes overrides, and `!usp override clear` removes them. Open votes switch to a new rule straight away.
 
 ## Online and instant: `usp_live.py`
 

@@ -175,6 +175,7 @@ class Live:
         B.save_settings(self.cfg, self.settings, self.sid)
 
     def catch_up(self):
+        B.ensure_help(self.cfg, self.me)
         cards = B.find_cards(self.cfg, self.me)
         n = B.read_commands(self.cfg, self.settings, cards, B.now_ms(), self.seen)
         B.check_cards(self.cfg, self.settings, cards)
