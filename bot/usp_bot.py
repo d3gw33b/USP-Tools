@@ -26,7 +26,8 @@ SETTINGS_MARK = "USP-BOT-SETTINGS"  # the older plain-text settings message; con
 SETTINGS_TITLE = "⚙️ USP bot settings"
 DISCORD_EPOCH = 1420070400000
 LIVE_FRESH_MS = 180_000  # the scheduled check stands back while the live bot has checked in this recently
-YES, MEH, NO = "✅", "➖", "❌"
+YES, MEH, NO = "✅", "🤷", "❌"
+OLD_MEH = "➖"  # the first cards used this; some Discord apps show it blank
 DISCLAIMER = "*AI summaries can misread or misunderstand code changes. Check the details before relying on this.*"
 AGREEMENT = "Agreed-to: CONTRIBUTING.md#contributor-agreement"
 
@@ -44,7 +45,11 @@ DEFAULT_SETTINGS = {
     },
     "model": "gemma",
     "ping_here": False,
-    "github_owners": [],  # GitHub accounts whose pull requests skip the vote (the repo's owner always does)
+    "github_owners": [],
+    # Overrides change how new votes are decided without touching the defaults above.
+    # scope -> {"mode": lazy|democratic|owner1|owner2|auto or None, "hours": float or None}
+    "override_on": False,
+    "overrides": {},  # GitHub accounts whose pull requests skip the vote (the repo's owner always does)
     "cursor": 0,   # commands up to this time (ms) are handled; shown as the settings card's timestamp
     "live": False,  # whether the live bot (usp_live.py) saved it last
 }
@@ -56,9 +61,10 @@ DEFAULT_SETTINGS = {
 TIER_MODE = {"tiny": "lazy", "small": "lazy", "medium": "democratic", "large": "owner1", "very_large": "owner2"}
 TIER_NAME = {"tiny": "Tiny", "small": "Small", "medium": "Medium", "large": "Large", "very_large": "Very large"}
 MODE_NAME = {"lazy": "Passes unless voted down", "democratic": "Majority vote",
-             "owner1": "One owner must approve", "owner2": "Both owners must approve", "none": "No vote needed"}
+             "owner1": "One owner must approve", "owner2": "Both owners must approve", "none": "No vote needed",
+             "auto": "Accepted automatically"}
 STATE_NAME = {"open": "Open", "approved": "Approved", "rejected": "Rejected", "expired": "Expired", "superseded": "Superseded",
-              "owner": "Owner's change"}
+              "owner": "Owner's change", "auto": "Accepted"}
 MODE_RANK = {"lazy": 0, "democratic": 1, "owner1": 2, "owner2": 3}
 
 # Free models that run on the GitHub machine itself (no key, nothing leaves GitHub).
@@ -136,6 +142,36 @@ def env_config():
     return {"owners": owners, "ch": ch}
 
 
+SCOPES = ["small", "medium", "large", "huge", "owners"]
+SCOPE_NAME = {"small": "Tiny and small", "medium": "Medium", "large": "Large", "huge": "Huge (very large)",
+              "owners": "Owners' own pull requests"}
+SCOPE_WORDS = {"small": "small", "tiny": "small", "medium": "medium", "med": "medium", "large": "large", "big": "large",
+               "huge": "huge", "xl": "huge", "extra-large": "huge", "very_large": "huge", "very-large": "huge",
+               "owners": "owners", "owner": "owners", "mine": "owners"}
+TIER_SCOPE = {"tiny": "small", "small": "small", "medium": "medium", "large": "large", "very_large": "huge"}
+HOW_WORDS = {"auto": "auto", "accept": "auto", "easy": "lazy", "lazy": "lazy", "vote": "democratic", "democracy": "democratic",
+             "majority": "democratic", "owner": "owner1", "owners": "owner1", "admin": "owner1", "both": "owner2"}
+HOW_NAME = {"auto": "accept right away", "lazy": "pass unless voted down", "democratic": "majority vote",
+            "owner1": "one owner's ✅", "owner2": "both owners' ✅"}
+
+
+def override_for(settings, scope):
+    """The active override for a scope ('owners' or a size), or {} when none applies."""
+    if not settings.get("override_on"):
+        return {}
+    return {k: v for k, v in settings.get("overrides", {}).get(scope, {}).items() if v is not None}
+
+
+def override_text(s):
+    lines = []
+    for sc in SCOPES:
+        o = s["overrides"].get(sc, {})
+        bits = ([HOW_NAME[o["mode"]]] if o.get("mode") else []) + ([f"{fmt_hours(o['hours'])} timer"] if o.get("hours") else [])
+        if bits:
+            lines.append(f"**{SCOPE_NAME[sc]}**: " + " · ".join(bits))
+    return "\n".join(lines)
+
+
 def now_ms():
     return int(time.time() * 1000)
 
@@ -179,6 +215,8 @@ def settings_embed(s):
     fields += [{"name": "Size tiers", "value": "\n".join(tier_line(s, t) for t in TIER_ORDER)},
                {"name": "AI model", "value": f"`{s['model']}`", "inline": True},
                {"name": "@here in mod chat", "value": "On" if s["ping_here"] else "Off", "inline": True},
+               {"name": "Override: " + ("ON" if s["override_on"] else "OFF"),
+                "value": override_text(s) or "Nothing set. Owners can use `!usp override` (see the help card)."},
                {"name": "Owner GitHub accounts (no vote needed)",
                 "value": " ".join(f"`{g}`" for g in s["github_owners"]) or "Only the repository owner. Add more with `!usp github-owners add <name>`."}]
     return {"title": SETTINGS_TITLE, "color": 0x5865F2, "fields": fields,
@@ -200,6 +238,21 @@ def parse_settings(e):
     if "AI model" in f:
         s["model"] = f["AI model"].strip("` ")
     s["ping_here"] = f.get("@here in mod chat", "Off").strip().lower() == "on"
+    for x in fields:
+        if x["name"].startswith("Override: "):
+            s["override_on"] = x["name"].endswith("ON")
+            names, hows = {v: k for k, v in SCOPE_NAME.items()}, {v: k for k, v in HOW_NAME.items()}
+            for line in x["value"].splitlines():
+                m = re.match(r"\*\*(.+?)\*\*: (.+)$", line)
+                if not m or m.group(1) not in names:
+                    continue
+                o = {}
+                for bit in m.group(2).split(" · "):
+                    if bit in hows:
+                        o["mode"] = hows[bit]
+                    elif bit.endswith(" timer") and parse_hours(bit[:-6]):
+                        o["hours"] = round(parse_hours(bit[:-6]), 4)
+                s["overrides"][names[m.group(1)]] = o
     s["github_owners"] = re.findall(r"`([A-Za-z0-9-]+)`", f.get("Owner GitHub accounts (no vote needed)", ""))
     if s["tiers"]["tiny"]["hours"] == 0.5 and s["tiers"]["small"]["hours"] == 0.75:  # the first defaults were too slow
         s["tiers"]["tiny"]["hours"], s["tiers"]["small"]["hours"] = 0.0833, 0.25
@@ -457,11 +510,15 @@ def short(repo, pr):
     return f"{'tools' if repo.lower().endswith('usp-tools') else 'usp'}#{pr}"
 
 
+PLAIN = {"lazy": "it passes when time runs out, unless more people vote ❌ than ✅. A ✅ from an owner passes it right away.",
+         "democratic": "whichever gets more votes wins, ✅ or ❌. If nobody votes, the owners decide.",
+         "owner1": "an owner (you or Steve) must ✅ it. Either owner's ❌ blocks it.",
+         "owner2": "both owners must ✅ it. Either owner's ❌ blocks it."}
 MODE_TEXT = {"lazy": "passes when the timer ends (or at once with an owner's ✅) unless more voters say ❌ than ✅",
              "democratic": "majority of the votes cast decides",
              "owner1": "needs one owner's ✅ (and no owner ❌)",
              "owner2": "needs both owners' ✅"}
-COLOR = {"open": 0x3498DB, "approved": 0x2ECC71, "owner": 0x2ECC71, "rejected": 0xE74C3C, "superseded": 0x95A5A6, "expired": 0x95A5A6}
+COLOR = {"open": 0x3498DB, "approved": 0x2ECC71, "owner": 0x2ECC71, "auto": 0x2ECC71, "rejected": 0xE74C3C, "superseded": 0x95A5A6, "expired": 0x95A5A6}
 
 
 def ts(epoch):
@@ -506,16 +563,24 @@ def cmd_card():
     hours = float(settings["tiers"][tier]["hours"])
     author = pr["user"]["login"]
     by_owner = author.lower() in {g.lower() for g in settings["github_owners"] + [os.environ.get("GITHUB_REPOSITORY_OWNER", "")] if g}
-    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + round(hours * 60) * 60, "state": "open"}
-    if by_owner:
-        st.update(mode="none", state="owner", deadline=now)
+    ov = override_for(settings, "owners") if by_owner else {}
+    if by_owner and not ov.get("mode"):
+        st = {"repo": repo, "pr": num, "tier": tier, "mode": "none", "deadline": now, "state": "owner"}
+    else:
+        by_owner = False  # an override for owners' pull requests puts them to a vote like any other
+        ov = ov or override_for(settings, TIER_SCOPE[tier])
+        mode, hours = ov.get("mode", mode), ov.get("hours", hours)
+        st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + round(hours * 60) * 60, "state": "open"}
+        if mode == "auto":
+            st.update(state="auto", deadline=now)
+    quiet = st["state"] != "open"  # no vote: no reactions, no notices
 
     # retire older cards for the same pull request
     for m in dc("GET", f"/channels/{cfg['ch']['voting']}/messages?limit=100"):
         if m["author"]["id"] != me or not m.get("embeds"):
             continue
         old = parse_card(m["embeds"][0])
-        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] in ("open", "owner"):
+        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] in ("open", "owner", "auto"):
             old["state"] = "superseded"
             e = m["embeds"][0]
             stamp_card(e, old)
@@ -527,11 +592,13 @@ def cmd_card():
     if summary:
         desc += f"**AI summary**\n{summary}\n\n{DISCLAIMER}\n\n"
     desc += f"**Size:** {len(files)} file(s), +{add} −{dele} → **{tier.replace('_', ' ')}**\n"
-    if by_owner:
-        desc += "**No vote needed:** an owner made this change. This card is for information."
+    if st["state"] == "owner":
+        desc += "**No vote needed:** an owner made this change. This card is just so everyone can see it."
+    elif st["state"] == "auto":
+        desc += "**Accepted automatically** because an owner turned on an override for this size. No vote needed."
     else:
-        desc += (f"**How it's decided:** {MODE_TEXT[mode]}. Vote ends {ts(st['deadline'])} or when everyone has voted.\n"
-                 f"Vote with {YES} good · {MEH} neutral · {NO} bad (one reaction each).")
+        desc += (f"**How it's decided:** {PLAIN[mode]}\n**Voting closes** {ts(st['deadline'])}, or sooner once everyone has voted.\n"
+                 f"**React once:** {YES} yes · {MEH} no opinion · {NO} no")
     embed = {
         "author": {"name": pr["user"]["login"], "icon_url": pr["user"]["avatar_url"], "url": pr["user"]["html_url"]},
         "title": f"[{repo}] Pull request #{num}: {pr['title']}"[:256],
@@ -541,12 +608,12 @@ def cmd_card():
     if model_note:
         embed["fields"] = [{"name": "Model", "value": model_note[:200], "inline": True}]
     card = dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {"embeds": [embed], "allowed_mentions": {"parse": []}})
-    for emo in (() if by_owner else (YES, MEH, NO)):
+    for emo in (() if quiet else (YES, MEH, NO)):
         dc("PUT", f"/channels/{cfg['ch']['voting']}/messages/{card['id']}/reactions/{urllib.parse.quote(emo)}/@me")
     guild = dc("GET", f"/channels/{cfg['ch']['voting']}").get("guild_id")
     link = f"https://discord.com/channels/{guild}/{cfg['ch']['voting']}/{card['id']}"
-    if by_owner:
-        print("Card posted (owner's change, no vote).")
+    if quiet:
+        print("Card posted (no vote needed).")
         return
     if mode in ("owner1", "owner2"):  # only the owners decide, so mod chat isn't told
         ping_owners(cfg, f"Owner approval needed for **{short(repo, num)}**.", card["id"])
@@ -568,22 +635,39 @@ def ping_owners(cfg, text, card_id):
 
 # ----------------------------------------------------------------------------------------- tick
 
-HELP = """**USP bot commands** (prefix `!usp`; instant while the bot is online, otherwise within 15 minutes)
-Anyone:
-• `!usp help` · `!usp status usp#12` · `!usp voters` · `!usp tiers` · `!usp model`
-Voters and owners:
-• `!usp vote usp#12`: a tiny/small change gets a full majority vote
-• `!usp escalate usp#12`: needs an owner's approval
-Owners only:
-• `!usp approve usp#12` · `!usp deny usp#12` · `!usp veto usp#12`
-• `!usp voters add @user` · `!usp voters remove @user`
-• `!usp tier small lines 100` · `!usp tier medium time 6h` (tiers: tiny, small, medium, large, very_large)
-• `!usp model set gemma`: simple names `gemma`, `gemma-small`, `qwen`, `llama`, `gemini`, `off`
-• `!usp model set gemma-3-1b` / `hf:owner/repo/file.gguf` / `gemini-2.5-flash`: exact model
-• `!usp ping here on|off`: @here in mod chat for new votes (off by default)
-• `!usp github-owners add <github-name>`: that account's pull requests skip the vote (the repo owner always does)
-`usp#N` is a USP pull request, `tools#N` a USP-tools one. Reactions count only from listed voters and owners, one each.
-Gemini runs on Google's servers and needs a GEMINI_API_KEY secret; its free tier may use what it reads. The others run on GitHub's machine for free."""
+HELP_TITLE = "📖 USP bot commands"
+HELP = """Type these in the bot settings channel, mod chat or the voting channel. The bot answers at once while it's online, otherwise within 15 minutes. `usp#12` means USP pull request 12, and `tools#12` means USP-tools pull request 12.
+
+**Anyone**
+`!usp help`: where this list is
+`!usp status usp#12`: how a vote is going
+`!usp voters` · `!usp tiers` · `!usp model` · `!usp override`: show the current settings
+
+**Voters and owners**
+`!usp vote usp#12`: turns a tiny or small change into a proper majority vote
+`!usp escalate usp#12`: makes a vote need an owner's ✅
+
+**Owners only**
+`!usp approve usp#12` · `!usp deny usp#12` · `!usp veto usp#12`
+`!usp voters add @name` · `!usp voters remove @name`
+`!usp github-owners add <github name>`: that account's pull requests skip the vote (the repo owner's always do)
+`!usp tier small time 15m` · `!usp tier medium lines 500`: change a size's default timer or line limit (sizes: tiny, small, medium, large, very_large)
+`!usp model set gemma`: the AI that writes summaries: `gemma`, `gemma-small`, `qwen`, `llama`, `gemini` or `off` (or an exact name)
+`!usp ping here on` / `off`: @here in mod chat for new votes
+
+**Override (owners only)**
+Changes how votes are decided without touching the defaults. Turn it off and the defaults are back.
+`!usp override <size> <how>`, for example `!usp override small auto`
+• sizes: `small` (tiny and small), `medium`, `large`, `huge`, `all` (every size), `owners` (pull requests opened by an owner, including Claude's)
+• how: `auto` accept right away · `easy` pass unless voted down · `vote` majority wins · `owner` one owner's ✅ · `both` both owners' ✅
+`!usp override medium time 1h`: a different timer (`time default` puts it back)
+`!usp override small default`: remove that size's override
+`!usp override off` / `on`: pause or resume all overrides · `!usp override clear`: remove them all
+Open votes switch to a new rule straight away. New timers apply to new votes.
+
+**Voting**
+React once: ✅ yes · 🤷 no opinion · ❌ no. Only listed voters and the owners count. An owner's ❌ always blocks.
+Gemini runs on Google's servers, needs a GEMINI_API_KEY secret, and its free tier may use what it reads. The other models run on GitHub's machine for free."""
 
 
 def parse_hours(s):
@@ -596,7 +680,7 @@ def parse_hours(s):
 
 def reactions(cfg, ch, mid):
     out = {}
-    for emo, val in ((YES, 1), (MEH, 0), (NO, -1)):
+    for emo, val in ((YES, 1), (MEH, 0), (OLD_MEH, 0), (NO, -1)):
         try:
             users = dc("GET", f"/channels/{ch}/messages/{mid}/reactions/{urllib.parse.quote(emo)}?limit=100")
         except RuntimeError:
@@ -691,7 +775,7 @@ def handle_command(cfg, settings, cards, msg, now):
     is_voter = is_owner or uid in settings["voters"]
     words = msg["content"].strip().split()[1:]
     if not words or words[0] == "help":
-        return HELP
+        return f"The full list is pinned in the bot settings channel: {cfg['help_link']}" if cfg.get("help_link") else HELP
     w = [x.lower() for x in words]
     only_owners = "Only the two owners can do that."
 
@@ -747,6 +831,47 @@ def handle_command(cfg, settings, cards, msg, now):
         settings["model"] = name.strip()
         note = " Gemini needs a GEMINI_API_KEY secret and sends the change to Google." if resolve_model(name)["kind"] == "gemini" else ""
         return f"Model set to `{settings['model']}` for new votes.{note}"
+    if w[0] == "override":
+        usage = "Try `!usp override small auto`, `!usp override all vote`, `!usp override medium time 1h` or `!usp override off`."
+        if len(w) == 1 or w[1] in ("show", "list", "status"):
+            return (f"Override is **{'on' if settings['override_on'] else 'off'}**.\n"
+                    + (override_text(settings) or "Nothing set.") + "\n" + usage)
+        if not is_owner:
+            return only_owners
+        if w[1] in ("on", "off"):
+            settings["override_on"] = w[1] == "on"
+            n = apply_override(cfg, settings, cards) if settings["override_on"] else 0
+            return f"Override is now **{w[1]}**." + (f" {n} open vote(s) switched to it." if n else "")
+        if w[1] == "clear":
+            settings["overrides"] = {}
+            return "All overrides removed. Votes use the defaults."
+        scopes = SCOPES[:4] if w[1] == "all" else [SCOPE_WORDS.get(w[1])]
+        if None in scopes or len(w) < 3:
+            return "Sizes are `small`, `medium`, `large`, `huge`, `all` or `owners`. " + usage
+        if w[2] in ("default", "reset", "remove"):
+            for sc in scopes:
+                settings["overrides"].pop(sc, None)
+            return f"Override removed for **{w[1]}**."
+        if w[2] == "time":
+            h = None if len(w) > 3 and w[3] in ("default", "reset") else parse_hours(w[3]) if len(w) > 3 else 0
+            if h is not None and h <= 0:
+                return "Time looks wrong. Examples: `5m`, `1h`, `2d`."
+            change = {"hours": round(h, 4) if h else None}
+        elif w[2] in HOW_WORDS:
+            change = {"mode": HOW_WORDS[w[2]]}
+        else:
+            return "How is `auto`, `easy`, `vote`, `owner` or `both`. " + usage
+        for sc in scopes:
+            o = {**settings["overrides"].get(sc, {}), **change}
+            o = {k: v for k, v in o.items() if v is not None}
+            if o:
+                settings["overrides"][sc] = o
+            else:
+                settings["overrides"].pop(sc, None)
+        settings["override_on"] = True
+        n = apply_override(cfg, settings, cards)
+        return (f"Override set for **{w[1]}** and turned on.\n" + override_text(settings)
+                + (f"\n{n} open vote(s) switched to it." if n else ""))
     if w[0] == "github-owners":
         if len(w) == 1 or w[1] == "list":
             return "Pull requests from these GitHub accounts skip the vote: " + (", ".join(f"`{g}`" for g in settings["github_owners"])
@@ -790,6 +915,42 @@ def handle_command(cfg, settings, cards, msg, now):
         announce(cfg, m, st, state, reason)
         return f"Done: {short(st['repo'], st['pr'])} {state}."
     return "I didn't understand that. Try `!usp help`."
+
+
+def apply_override(cfg, settings, cards):
+    """Switches open votes to the active override's rule. Returns how many changed."""
+    n = 0
+    for m, st in cards:
+        mode = override_for(settings, TIER_SCOPE[st["tier"]]).get("mode")
+        if st["state"] != "open" or not mode or mode == st["mode"]:
+            continue
+        if mode == "auto":
+            st["state"] = "approved"
+            edit_card(cfg, m, st, "➜ **APPROVED**: accepted automatically by an owner's override.")
+            announce(cfg, m, st, "approved", "accepted automatically by an override")
+        else:
+            st["mode"] = mode
+            edit_card(cfg, m, st, f"➜ Override: now **{MODE_TEXT[mode]}**.")
+        n += 1
+    return n
+
+
+def ensure_help(cfg, me):
+    """Keeps one pinned help card in the settings channel, matching this version of the bot."""
+    ch = cfg["ch"]["settings"]
+    embed = {"title": HELP_TITLE, "description": HELP, "color": 0x5865F2, "footer": {"text": "This card updates itself when the bot changes."}}
+    card = next((m for m in dc("GET", f"/channels/{ch}/messages?limit=100")
+                 if m["author"]["id"] == me and m.get("embeds") and m["embeds"][0].get("title") == HELP_TITLE), None)
+    if card is None:
+        card = dc("POST", f"/channels/{ch}/messages", {"embeds": [embed], "allowed_mentions": {"parse": []}})
+        try:
+            dc("PUT", f"/channels/{ch}/pins/{card['id']}")
+        except Exception:
+            pass
+    elif card["embeds"][0].get("description") != HELP:
+        dc("PATCH", f"/channels/{ch}/messages/{card['id']}", {"embeds": [embed]})
+    guild = card.get("guild_id") or dc("GET", f"/channels/{ch}").get("guild_id")
+    cfg["help_link"] = f"https://discord.com/channels/{guild}/{ch}/{card['id']}"
 
 
 def run_command(cfg, settings, cards, msg):
@@ -853,6 +1014,7 @@ def cmd_tick():
     if settings["live"] and start - settings["cursor"] < LIVE_FRESH_MS:
         print("tick: the live bot is online; nothing to do.")
         return
+    ensure_help(cfg, me)
     cards = find_cards(cfg, me)
     handled = read_commands(cfg, settings, cards, start)
     decided = check_cards(cfg, settings, cards)
