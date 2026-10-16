@@ -200,11 +200,21 @@ def llama_server_path():
         return found[0]
     os.makedirs(d, exist_ok=True)
     rel = gh("/repos/ggml-org/llama.cpp/releases/latest")
-    asset = next(a for a in rel["assets"] if re.search(r"bin-ubuntu-x64\.zip$", a["name"]))
+    names = [a["name"] for a in rel["assets"]]
+    def plain_cpu(n):
+        return re.search(r"ubuntu.*x64.*\.(zip|tar\.gz)$", n) and not re.search(r"vulkan|cuda|rocm|sycl|hip|openvino|s390|arm", n)
+    asset = next((a for a in rel["assets"] if plain_cpu(a["name"])), None)
+    if asset is None:
+        raise RuntimeError("no plain Linux CPU build in llama.cpp release: " + ", ".join(names)[:600])
     z = os.path.join(d, asset["name"])
     download(asset["browser_download_url"], z)
-    with zipfile.ZipFile(z) as zf:
-        zf.extractall(d)
+    if z.endswith(".zip"):
+        with zipfile.ZipFile(z) as zf:
+            zf.extractall(d)
+    else:
+        import tarfile
+        with tarfile.open(z) as tf:
+            tf.extractall(d, filter="data")
     exe = glob.glob(os.path.join(d, "**", "llama-server"), recursive=True)[0]
     for f in glob.glob(os.path.join(os.path.dirname(exe), "*")):
         os.chmod(f, 0o755)
