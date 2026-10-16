@@ -1,0 +1,25 @@
+# Run by hand: connects the live bot (bot/usp_live.py) to Discord for 90 seconds to check that it works.
+# While it runs the bot shows as online and answers commands, then it hands back to vote-counter.
+# Prints only short status lines, never Discord content (this repo's logs are public).
+name: bot-live-check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: vote-counter
+  cancel-in-progress: false
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bot
+      - name: Connect for 90 seconds
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_OWNER_IDS: ${{ secrets.DISCORD_OWNER_IDS }}
+          DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+        run: python3 -u bot/usp_live.py --for 90
