@@ -199,13 +199,16 @@ def llama_server_path():
     if found:
         return found[0]
     os.makedirs(d, exist_ok=True)
-    rel = gh("/repos/ggml-org/llama.cpp/releases/latest")
-    names = [a["name"] for a in rel["assets"]]
     def plain_cpu(n):
         return re.search(r"ubuntu.*x64.*\.(zip|tar\.gz)$", n) and not re.search(r"vulkan|cuda|rocm|sycl|hip|openvino|s390|arm", n)
-    asset = next((a for a in rel["assets"] if plain_cpu(a["name"])), None)
+    asset, seen = None, []
+    for rel in gh("/repos/ggml-org/llama.cpp/releases?per_page=20"):  # newest first; some releases carry no binaries
+        seen += [a["name"] for a in rel["assets"]]
+        asset = next((a for a in rel["assets"] if plain_cpu(a["name"])), None)
+        if asset:
+            break
     if asset is None:
-        raise RuntimeError("no plain Linux CPU build in llama.cpp release: " + ", ".join(names)[:600])
+        raise RuntimeError("no plain Linux CPU build in recent llama.cpp releases: " + ", ".join(sorted(set(seen)))[:800])
     z = os.path.join(d, asset["name"])
     download(asset["browser_download_url"], z)
     if z.endswith(".zip"):
