@@ -36,14 +36,15 @@ DEFAULT_SETTINGS = {
     "voters": [],
     # max = largest number of changed lines (added + removed) for the tier; hours = vote timer
     "tiers": {
-        "tiny": {"max": 20, "hours": 0.5},
-        "small": {"max": 100, "hours": 0.75},
+        "tiny": {"max": 20, "hours": 0.0833},   # 5 minutes
+        "small": {"max": 100, "hours": 0.25},   # 15 minutes
         "medium": {"max": 500, "hours": 6},
         "large": {"max": 2000, "hours": 24},
         "very_large": {"max": None, "hours": 48},
     },
     "model": "gemma",
     "ping_here": False,
+    "github_owners": [],  # GitHub accounts whose pull requests skip the vote (the repo's owner always does)
     "cursor": 0,   # commands up to this time (ms) are handled; shown as the settings card's timestamp
     "live": False,  # whether the live bot (usp_live.py) saved it last
 }
@@ -55,8 +56,9 @@ DEFAULT_SETTINGS = {
 TIER_MODE = {"tiny": "lazy", "small": "lazy", "medium": "democratic", "large": "owner1", "very_large": "owner2"}
 TIER_NAME = {"tiny": "Tiny", "small": "Small", "medium": "Medium", "large": "Large", "very_large": "Very large"}
 MODE_NAME = {"lazy": "Passes unless voted down", "democratic": "Majority vote",
-             "owner1": "One owner must approve", "owner2": "Both owners must approve"}
-STATE_NAME = {"open": "Open", "approved": "Approved", "rejected": "Rejected", "expired": "Expired", "superseded": "Superseded"}
+             "owner1": "One owner must approve", "owner2": "Both owners must approve", "none": "No vote needed"}
+STATE_NAME = {"open": "Open", "approved": "Approved", "rejected": "Rejected", "expired": "Expired", "superseded": "Superseded",
+              "owner": "Owner's change"}
 MODE_RANK = {"lazy": 0, "democratic": 1, "owner1": 2, "owner2": 3}
 
 # Free models that run on the GitHub machine itself (no key, nothing leaves GitHub).
@@ -176,7 +178,9 @@ def settings_embed(s):
     fields = [{"name": "Voters" if i == 0 else "Voters (more)", "value": c} for i, c in enumerate(chunks)]
     fields += [{"name": "Size tiers", "value": "\n".join(tier_line(s, t) for t in TIER_ORDER)},
                {"name": "AI model", "value": f"`{s['model']}`", "inline": True},
-               {"name": "@here in mod chat", "value": "On" if s["ping_here"] else "Off", "inline": True}]
+               {"name": "@here in mod chat", "value": "On" if s["ping_here"] else "Off", "inline": True},
+               {"name": "Owner GitHub accounts (no vote needed)",
+                "value": " ".join(f"`{g}`" for g in s["github_owners"]) or "Only the repository owner. Add more with `!usp github-owners add <name>`."}]
     return {"title": SETTINGS_TITLE, "color": 0x5865F2, "fields": fields,
             "description": "Change these with `!usp` commands. `!usp help` lists them.",
             "footer": {"text": "🟢 Online, replies instantly · last check" if s.get("live") else "Checks every 15 minutes · last check"},
@@ -196,6 +200,9 @@ def parse_settings(e):
     if "AI model" in f:
         s["model"] = f["AI model"].strip("` ")
     s["ping_here"] = f.get("@here in mod chat", "Off").strip().lower() == "on"
+    s["github_owners"] = re.findall(r"`([A-Za-z0-9-]+)`", f.get("Owner GitHub accounts (no vote needed)", ""))
+    if s["tiers"]["tiny"]["hours"] == 0.5 and s["tiers"]["small"]["hours"] == 0.75:  # the first defaults were too slow
+        s["tiers"]["tiny"]["hours"], s["tiers"]["small"]["hours"] = 0.0833, 0.25
     s["cursor"] = from_iso(e["timestamp"]) if e.get("timestamp") else 0
     s["live"] = (e.get("footer") or {}).get("text", "").startswith("🟢")
     return s
@@ -423,7 +430,7 @@ def label(repo, pr):
 
 
 def footer(st):
-    ends = "Vote ends" if st["state"] == "open" else "Vote ended"
+    ends = {"open": "Vote ends", "owner": "Posted"}.get(st["state"], "Vote ended")
     return " · ".join([label(st["repo"], st["pr"]), TIER_NAME[st["tier"]], MODE_NAME[st["mode"]], STATE_NAME[st["state"]], ends])
 
 
@@ -450,11 +457,11 @@ def short(repo, pr):
     return f"{'tools' if repo.lower().endswith('usp-tools') else 'usp'}#{pr}"
 
 
-MODE_TEXT = {"lazy": "passes when the timer ends unless more voters say ❌ than ✅",
+MODE_TEXT = {"lazy": "passes when the timer ends (or at once with an owner's ✅) unless more voters say ❌ than ✅",
              "democratic": "majority of the votes cast decides",
              "owner1": "needs one owner's ✅ (and no owner ❌)",
              "owner2": "needs both owners' ✅"}
-COLOR = {"open": 0x3498DB, "approved": 0x2ECC71, "rejected": 0xE74C3C, "superseded": 0x95A5A6, "expired": 0x95A5A6}
+COLOR = {"open": 0x3498DB, "approved": 0x2ECC71, "owner": 0x2ECC71, "rejected": 0xE74C3C, "superseded": 0x95A5A6, "expired": 0x95A5A6}
 
 
 def ts(epoch):
@@ -497,14 +504,18 @@ def cmd_card():
 
     now = now_ms() // 1000
     hours = float(settings["tiers"][tier]["hours"])
-    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + int(hours * 3600), "state": "open"}
+    author = pr["user"]["login"]
+    by_owner = author.lower() in {g.lower() for g in settings["github_owners"] + [os.environ.get("GITHUB_REPOSITORY_OWNER", "")] if g}
+    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + round(hours * 60) * 60, "state": "open"}
+    if by_owner:
+        st.update(mode="none", state="owner", deadline=now)
 
     # retire older cards for the same pull request
     for m in dc("GET", f"/channels/{cfg['ch']['voting']}/messages?limit=100"):
         if m["author"]["id"] != me or not m.get("embeds"):
             continue
         old = parse_card(m["embeds"][0])
-        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] == "open":
+        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] in ("open", "owner"):
             old["state"] = "superseded"
             e = m["embeds"][0]
             stamp_card(e, old)
@@ -515,9 +526,12 @@ def cmd_card():
     desc = f"**Automatic check**\n{risk}\n\n"
     if summary:
         desc += f"**AI summary**\n{summary}\n\n{DISCLAIMER}\n\n"
-    desc += (f"**Size:** {len(files)} file(s), +{add} −{dele} → **{tier.replace('_', ' ')}**\n"
-             f"**How it's decided:** {MODE_TEXT[mode]}. Vote ends {ts(st['deadline'])} or when everyone has voted.\n"
-             f"Vote with {YES} good · {MEH} neutral · {NO} bad (one reaction each).")
+    desc += f"**Size:** {len(files)} file(s), +{add} −{dele} → **{tier.replace('_', ' ')}**\n"
+    if by_owner:
+        desc += "**No vote needed:** an owner made this change. This card is for information."
+    else:
+        desc += (f"**How it's decided:** {MODE_TEXT[mode]}. Vote ends {ts(st['deadline'])} or when everyone has voted.\n"
+                 f"Vote with {YES} good · {MEH} neutral · {NO} bad (one reaction each).")
     embed = {
         "author": {"name": pr["user"]["login"], "icon_url": pr["user"]["avatar_url"], "url": pr["user"]["html_url"]},
         "title": f"[{repo}] Pull request #{num}: {pr['title']}"[:256],
@@ -527,22 +541,28 @@ def cmd_card():
     if model_note:
         embed["fields"] = [{"name": "Model", "value": model_note[:200], "inline": True}]
     card = dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {"embeds": [embed], "allowed_mentions": {"parse": []}})
-    for emo in (YES, MEH, NO):
+    for emo in (() if by_owner else (YES, MEH, NO)):
         dc("PUT", f"/channels/{cfg['ch']['voting']}/messages/{card['id']}/reactions/{urllib.parse.quote(emo)}/@me")
     guild = dc("GET", f"/channels/{cfg['ch']['voting']}").get("guild_id")
     link = f"https://discord.com/channels/{guild}/{cfg['ch']['voting']}/{card['id']}"
-    here = "@here " if settings.get("ping_here") else ""
-    dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
-        "content": f"{here}🗳️ New vote: **{short(repo, num)}** ({tier.replace('_', ' ')}) → {link}",
-        "allowed_mentions": {"parse": ["everyone"] if here else []}})
-    if mode in ("owner1", "owner2"):
-        ping_owners(cfg, f"Owner approval needed for **{short(repo, num)}** → {link}")
+    if by_owner:
+        print("Card posted (owner's change, no vote).")
+        return
+    if mode in ("owner1", "owner2"):  # only the owners decide, so mod chat isn't told
+        ping_owners(cfg, f"Owner approval needed for **{short(repo, num)}**.", card["id"])
+    else:
+        here = "@here " if settings.get("ping_here") else ""
+        dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
+            "content": f"{here}🗳️ New vote: **{short(repo, num)}** ({tier.replace('_', ' ')}) → {link}",
+            "allowed_mentions": {"parse": ["everyone"] if here else []}})
     print("Card posted.")
 
 
-def ping_owners(cfg, text):
-    dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
+def ping_owners(cfg, text, card_id):
+    """Pings the owners in the voting channel, as a reply to the card."""
+    dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {
         "content": " ".join(f"<@{o}>" for o in cfg["owners"]) + " " + text,
+        "message_reference": {"message_id": card_id, "fail_if_not_exists": False},
         "allowed_mentions": {"users": cfg["owners"]}})
 
 
@@ -561,6 +581,7 @@ Owners only:
 • `!usp model set gemma`: simple names `gemma`, `gemma-small`, `qwen`, `llama`, `gemini`, `off`
 • `!usp model set gemma-3-1b` / `hf:owner/repo/file.gguf` / `gemini-2.5-flash`: exact model
 • `!usp ping here on|off`: @here in mod chat for new votes (off by default)
+• `!usp github-owners add <github-name>`: that account's pull requests skip the vote (the repo owner always does)
 `usp#N` is a USP pull request, `tools#N` a USP-tools one. Reactions count only from listed voters and owners, one each.
 Gemini runs on Google's servers and needs a GEMINI_API_KEY secret; its free tier may use what it reads. The others run on GitHub's machine for free."""
 
@@ -611,6 +632,8 @@ def decide(cfg, settings, st, rx, now):
         if any(v == 1 for v in ov.values()):
             return "approved", "an owner approved"
         return ("expired", "timer ended without an owner approving") if now >= st["deadline"] else (None, None)
+    if mode == "lazy" and any(v == 1 for v in ov.values()):
+        return "approved", "an owner approved"
     if not ended:
         return None, None
     if mode == "democratic":
@@ -631,16 +654,14 @@ def edit_card(cfg, m, st, extra=None):
 
 
 def announce(cfg, m, st, state, reason):
-    guild = m.get("guild_id") or dc("GET", f"/channels/{cfg['ch']['voting']}").get("guild_id")
-    link = f"https://discord.com/channels/{guild}/{cfg['ch']['voting']}/{m['id']}"
     word = {"approved": "✅ APPROVED", "rejected": "❌ REJECTED", "expired": "⌛ EXPIRED"}[state]
     tag = short(st["repo"], st["pr"])
     dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {
+        "content": " ".join(f"<@{o}>" for o in cfg["owners"]),
         "embeds": [{"title": f"Decision for {tag}: {word}", "description": f"Reason: {reason}.\n"
                     + ("An owner can now merge it on GitHub." if state == "approved" else "An owner should close it on GitHub or ask for changes."),
                     "color": COLOR.get(state, 0x95A5A6)}],
-        "message_reference": {"message_id": m["id"], "fail_if_not_exists": False}, "allowed_mentions": {"parse": []}})
-    ping_owners(cfg, f"Decision for **{tag}**: {word} ({reason}) → {link}")
+        "message_reference": {"message_id": m["id"], "fail_if_not_exists": False}, "allowed_mentions": {"users": cfg["owners"]}})
 
 
 def find_cards(cfg, me):
@@ -726,6 +747,19 @@ def handle_command(cfg, settings, cards, msg, now):
         settings["model"] = name.strip()
         note = " Gemini needs a GEMINI_API_KEY secret and sends the change to Google." if resolve_model(name)["kind"] == "gemini" else ""
         return f"Model set to `{settings['model']}` for new votes.{note}"
+    if w[0] == "github-owners":
+        if len(w) == 1 or w[1] == "list":
+            return "Pull requests from these GitHub accounts skip the vote: " + (", ".join(f"`{g}`" for g in settings["github_owners"])
+                    or "none added") + ". The repository owner always does."
+        if not is_owner:
+            return only_owners
+        names = [n for n in words[2:] if re.fullmatch(r"[A-Za-z0-9-]{1,39}", n)]
+        if w[1] not in ("add", "remove") or not names:
+            return "Use `!usp github-owners add <github-name>` or `remove <github-name>`."
+        low = {n.lower() for n in names}
+        keep = [g for g in settings["github_owners"] if g.lower() not in low]
+        settings["github_owners"] = keep + (names if w[1] == "add" else [])
+        return "Owner GitHub accounts now: " + (", ".join(f"`{g}`" for g in settings["github_owners"]) or "only the repository owner")
     if w[0] == "ping" and len(w) >= 3 and w[1] == "here":
         if not is_owner:
             return only_owners
@@ -745,7 +779,7 @@ def handle_command(cfg, settings, cards, msg, now):
             st["mode"] = target
             edit_card(cfg, m, st, f"➜ Changed to **{MODE_TEXT[target]}** by <@{uid}>.")
             if target == "owner1":
-                ping_owners(cfg, f"<@{uid}> asked for owner approval on **{short(st['repo'], st['pr'])}**.")
+                ping_owners(cfg, f"<@{uid}> asked for owner approval on **{short(st['repo'], st['pr'])}**.", m["id"])
             return f"{short(st['repo'], st['pr'])} now: {MODE_TEXT[target]}."
         if not is_owner:
             return only_owners
@@ -793,9 +827,9 @@ def check_card(cfg, settings, m, st, now):
     state, reason = decide(cfg, settings, st, reactions(cfg, cfg["ch"]["voting"], m["id"]), now)
     if state == "escalate":
         st["mode"] = "owner1"
-        st["deadline"] = now + int(float(settings["tiers"]["large"]["hours"]) * 3600)
+        st["deadline"] = now + round(float(settings["tiers"]["large"]["hours"]) * 60) * 60
         edit_card(cfg, m, st, f"➜ {reason}. Now: **{MODE_TEXT['owner1']}**, ends {ts(st['deadline'])}.")
-        ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.")
+        ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.", m["id"])
     elif state:
         st["state"] = state
         edit_card(cfg, m, st, f"➜ **{state.upper()}**: {reason}.")
