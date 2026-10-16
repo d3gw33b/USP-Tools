@@ -1,0 +1,40 @@
+# Posts a review card for each pull request to the Discord voting channel, with an automatic risk check
+# and a plain-English AI summary from a free model that runs on this GitHub machine.
+# Needs secrets DISCORD_BOT_TOKEN, DISCORD_OWNER_IDS, DISCORD_CHANNEL_IDS (optional GEMINI_API_KEY).
+# pull_request_target runs this file from main, so a pull request can't change it, and its code is never run.
+name: review-card
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: review-card-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  card:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+      DISCORD_OWNER_IDS: ${{ secrets.DISCORD_OWNER_IDS }}
+      DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bot
+      - run: echo "BOT=$GITHUB_WORKSPACE/bot" >> "$GITHUB_ENV"
+      - name: Pick the model
+        id: model
+        run: echo "id=$(python3 $BOT/usp_bot.py resolve-model)" >> "$GITHUB_OUTPUT"
+      - name: Reuse the downloaded model
+        if: steps.model.outputs.id != 'off'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/usp-llm
+          key: usp-llm-${{ steps.model.outputs.id }}-v1
+      - name: Post the review card
+        run: python3 $BOT/usp_bot.py card

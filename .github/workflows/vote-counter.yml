@@ -1,0 +1,28 @@
+# Every 15 minutes: reads !usp commands and counts votes in Discord, then posts decisions.
+# Runs here because public repos have free Action minutes. It never reads the private USP repo,
+# and it must never print Discord content to the log (public repos' logs are public).
+# Needs secrets DISCORD_BOT_TOKEN, DISCORD_OWNER_IDS, DISCORD_CHANNEL_IDS.
+name: vote-counter
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: vote-counter
+  cancel-in-progress: false
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bot
+      - name: Process commands and votes
+        env:
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_OWNER_IDS: ${{ secrets.DISCORD_OWNER_IDS }}
+          DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+        run: python3 bot/usp_bot.py tick
