@@ -544,22 +544,23 @@ def cmd_card():
     guild = dc("GET", f"/channels/{cfg['ch']['voting']}").get("guild_id")
     link = f"https://discord.com/channels/{guild}/{cfg['ch']['voting']}/{card['id']}"
     if by_owner:
-        dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
-            "content": f"📝 Owner change, no vote needed: **{short(repo, num)}** → {link}", "allowed_mentions": {"parse": []}})
         print("Card posted (owner's change, no vote).")
         return
-    here = "@here " if settings.get("ping_here") else ""
-    dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
-        "content": f"{here}🗳️ New vote: **{short(repo, num)}** ({tier.replace('_', ' ')}) → {link}",
-        "allowed_mentions": {"parse": ["everyone"] if here else []}})
-    if mode in ("owner1", "owner2"):
-        ping_owners(cfg, f"Owner approval needed for **{short(repo, num)}** → {link}")
+    if mode in ("owner1", "owner2"):  # only the owners decide, so mod chat isn't told
+        ping_owners(cfg, f"Owner approval needed for **{short(repo, num)}**.", card["id"])
+    else:
+        here = "@here " if settings.get("ping_here") else ""
+        dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
+            "content": f"{here}🗳️ New vote: **{short(repo, num)}** ({tier.replace('_', ' ')}) → {link}",
+            "allowed_mentions": {"parse": ["everyone"] if here else []}})
     print("Card posted.")
 
 
-def ping_owners(cfg, text):
-    dc("POST", f"/channels/{cfg['ch']['mod']}/messages", {
+def ping_owners(cfg, text, card_id):
+    """Pings the owners in the voting channel, as a reply to the card."""
+    dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {
         "content": " ".join(f"<@{o}>" for o in cfg["owners"]) + " " + text,
+        "message_reference": {"message_id": card_id, "fail_if_not_exists": False},
         "allowed_mentions": {"users": cfg["owners"]}})
 
 
@@ -649,16 +650,14 @@ def edit_card(cfg, m, st, extra=None):
 
 
 def announce(cfg, m, st, state, reason):
-    guild = m.get("guild_id") or dc("GET", f"/channels/{cfg['ch']['voting']}").get("guild_id")
-    link = f"https://discord.com/channels/{guild}/{cfg['ch']['voting']}/{m['id']}"
     word = {"approved": "✅ APPROVED", "rejected": "❌ REJECTED", "expired": "⌛ EXPIRED"}[state]
     tag = short(st["repo"], st["pr"])
     dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {
+        "content": " ".join(f"<@{o}>" for o in cfg["owners"]),
         "embeds": [{"title": f"Decision for {tag}: {word}", "description": f"Reason: {reason}.\n"
                     + ("An owner can now merge it on GitHub." if state == "approved" else "An owner should close it on GitHub or ask for changes."),
                     "color": COLOR.get(state, 0x95A5A6)}],
-        "message_reference": {"message_id": m["id"], "fail_if_not_exists": False}, "allowed_mentions": {"parse": []}})
-    ping_owners(cfg, f"Decision for **{tag}**: {word} ({reason}) → {link}")
+        "message_reference": {"message_id": m["id"], "fail_if_not_exists": False}, "allowed_mentions": {"users": cfg["owners"]}})
 
 
 def find_cards(cfg, me):
@@ -776,7 +775,7 @@ def handle_command(cfg, settings, cards, msg, now):
             st["mode"] = target
             edit_card(cfg, m, st, f"➜ Changed to **{MODE_TEXT[target]}** by <@{uid}>.")
             if target == "owner1":
-                ping_owners(cfg, f"<@{uid}> asked for owner approval on **{short(st['repo'], st['pr'])}**.")
+                ping_owners(cfg, f"<@{uid}> asked for owner approval on **{short(st['repo'], st['pr'])}**.", m["id"])
             return f"{short(st['repo'], st['pr'])} now: {MODE_TEXT[target]}."
         if not is_owner:
             return only_owners
@@ -826,7 +825,7 @@ def check_card(cfg, settings, m, st, now):
         st["mode"] = "owner1"
         st["deadline"] = now + int(float(settings["tiers"]["large"]["hours"]) * 3600)
         edit_card(cfg, m, st, f"➜ {reason}. Now: **{MODE_TEXT['owner1']}**, ends {ts(st['deadline'])}.")
-        ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.")
+        ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.", m["id"])
     elif state:
         st["state"] = state
         edit_card(cfg, m, st, f"➜ **{state.upper()}**: {reason}.")

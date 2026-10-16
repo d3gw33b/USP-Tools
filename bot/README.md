@@ -5,7 +5,8 @@ GitHub Actions does the work every 15 minutes. To make the bot show as online an
 `usp_live.py` on a computer that stays on (see below).
 
 - **`review-card` workflow:** on each pull request, it runs an automatic risk check and writes a plain-English AI
-  summary with a free model on GitHub's machine. Then it posts the card with ✅ ➖ ❌ reactions and a notice in mod chat.
+  summary with a free model on GitHub's machine. Then it posts the card with ✅ ➖ ❌ reactions. Mod chat gets a notice only
+  when others can vote; votes only the owners decide ping the owners in the voting channel instead.
 - **`vote-counter` workflow:** every 15 minutes, it reads `!usp` commands and reactions, and posts decisions.
 - **`bot-selftest` workflow:** run it by hand to check a model works.
 - **`bot-live-check` workflow:** run it by hand to check the live bot connects (it stays online for 90 seconds).
