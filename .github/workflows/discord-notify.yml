@@ -46,6 +46,6 @@ jobs:
             fi
             TITLE="[$REPO] Pull request $what: #$PR_NUM $PR_TITLE"
             URL=$PR_URL
-            DESC=$( [ "$ACTION" = opened ] && printf '%s' "${PR_BODY:0:300}" )
+            DESC=""; if [ "$ACTION" = opened ]; then DESC=${PR_BODY:0:300}; fi
           fi
           jq -n --arg t "${TITLE:0:250}" --arg u "$URL" --arg d "${DESC:0:4000}" --argjson c "$COLOR" --arg an "$SENDER" --arg ai "$SENDER_AVATAR" --arg au "https://github.com/$SENDER" '{username: "GitHub", avatar_url: "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png", allowed_mentions: {parse: []}, embeds: [{author: {name: $an, icon_url: $ai, url: $au}, title: $t, url: $u, description: $d, color: $c}]}' | curl -fsS -H "Content-Type: application/json" -d @- "$WEBHOOK"
