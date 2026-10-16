@@ -2,6 +2,8 @@
 # Uses a made-up change only. Run it from the Actions tab.
 name: bot-selftest
 on:
+  push:
+    branches: [review-bot-selftest]
   workflow_dispatch:
     inputs:
       model:
@@ -20,5 +22,5 @@ jobs:
       - name: Run the model on a sample change
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          MODEL: ${{ inputs.model }}
+          MODEL: ${{ inputs.model || 'gemma' }}
         run: time python3 bot/usp_bot.py selftest "$MODEL"
