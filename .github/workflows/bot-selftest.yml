@@ -1,0 +1,24 @@
+# Manual check that a free model downloads and writes a sensible summary on GitHub's machine.
+# Uses a made-up change only. Run it from the Actions tab.
+name: bot-selftest
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Model (gemma, gemma-small, qwen, llama, or an exact name)"
+        default: gemma
+permissions:
+  contents: read
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: bot
+      - name: Run the model on a sample change
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MODEL: ${{ inputs.model }}
+        run: time python3 bot/usp_bot.py selftest "$MODEL"
