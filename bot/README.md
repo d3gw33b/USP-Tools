@@ -1,12 +1,16 @@
 # USP review bot
 
 Posts a review card for every pull request into a Discord voting channel, counts votes, and takes `!usp` commands.
-It runs only inside GitHub Actions, so there's no server to keep on.
+GitHub Actions does the work every 15 minutes. To make the bot show as online and answer instantly, run
+`usp_live.py` on a computer that stays on (see below).
 
 - **`review-card` workflow:** on each pull request, it runs an automatic risk check and writes a plain-English AI
   summary with a free model on GitHub's machine. Then it posts the card with ✅ ➖ ❌ reactions and a notice in mod chat.
 - **`vote-counter` workflow:** every 15 minutes, it reads `!usp` commands and reactions, and posts decisions.
 - **`bot-selftest` workflow:** run it by hand to check a model works.
+- **`bot-live-check` workflow:** run it by hand to check the live bot connects (it stays online for 90 seconds).
+
+Settings are kept in a readable card the bot pins in the settings channel. Change them only with `!usp` commands.
 
 ## Size tiers (defaults; change with `!usp tier`)
 
@@ -30,3 +34,19 @@ The bot never merges. An owner merges or closes on GitHub.
 - `GEMINI_API_KEY`: optional, only for Gemini models.
 
 Type `!usp help` in Discord for the commands.
+
+## Online and instant: `usp_live.py`
+
+1. Install Python 3.11 or newer.
+2. Copy `bot.env.example` to `bot.env` (next to `usp_live.py`) and fill in the same three values as the secrets:
+   ```
+   DISCORD_BOT_TOKEN=...
+   DISCORD_OWNER_IDS=...
+   DISCORD_CHANNEL_IDS=mod=...,voting=...,settings=...
+   ```
+   `bot.env` is in `.gitignore`. Never commit it.
+3. Run `python usp_live.py` (on Windows, double-click `start-bot.bat`). The bot shows as online, answers commands instantly and decides votes the moment the
+   last voter reacts. Close it and the 15-minute check takes over again within about 3 minutes.
+
+On Windows, `autostart-on.bat` runs it in the background now and at every login (log in `bot.log`), and
+`autostart-off.bat` stops it and turns that off. Only one copy runs per computer; `python usp_live.py --stop` stops it.

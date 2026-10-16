@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """USP review bot: posts pull-request review cards to Discord, counts votes, and takes commands.
 
-Runs inside GitHub Actions only (no server). Standard library only.
+Runs inside GitHub Actions; usp_live.py keeps it online and instant from any computer. Standard library only.
 
   python usp_bot.py resolve-model     # prints the model id chosen in settings (for the cache step)
   python usp_bot.py card              # post a review card for the current pull request
@@ -18,11 +18,14 @@ Environment:
 This file runs in a public repo. Never print pull request content, summaries or settings to the log.
 """
 import json, os, re, sys, time, urllib.request, urllib.error, urllib.parse, zipfile, subprocess, glob
+from datetime import datetime, timezone
 
 DISCORD = "https://discord.com/api/v10"
 UA = "DiscordBot (https://github.com/d3gw33b/USP-tools, 1)"
-SETTINGS_MARK = "USP-BOT-SETTINGS"
-CARD_MARK = "usp-vote"
+SETTINGS_MARK = "USP-BOT-SETTINGS"  # the older plain-text settings message; converted on first sight
+SETTINGS_TITLE = "⚙️ USP bot settings"
+DISCORD_EPOCH = 1420070400000
+LIVE_FRESH_MS = 180_000  # the scheduled check stands back while the live bot has checked in this recently
 YES, MEH, NO = "✅", "➖", "❌"
 DISCLAIMER = "*AI summaries can misread or misunderstand code changes. Check the details before relying on this.*"
 AGREEMENT = "Agreed-to: CONTRIBUTING.md#contributor-agreement"
@@ -41,7 +44,8 @@ DEFAULT_SETTINGS = {
     },
     "model": "gemma",
     "ping_here": False,
-    "last": {},
+    "cursor": 0,   # commands up to this time (ms) are handled; shown as the settings card's timestamp
+    "live": False,  # whether the live bot (usp_live.py) saved it last
 }
 # How each tier is decided by default:
 #   lazy       passes when the timer ends unless more voters said no than yes
@@ -49,6 +53,10 @@ DEFAULT_SETTINGS = {
 #   owner1     one owner approves (and no owner vetoes)
 #   owner2     both owners approve
 TIER_MODE = {"tiny": "lazy", "small": "lazy", "medium": "democratic", "large": "owner1", "very_large": "owner2"}
+TIER_NAME = {"tiny": "Tiny", "small": "Small", "medium": "Medium", "large": "Large", "very_large": "Very large"}
+MODE_NAME = {"lazy": "Passes unless voted down", "democratic": "Majority vote",
+             "owner1": "One owner must approve", "owner2": "Both owners must approve"}
+STATE_NAME = {"open": "Open", "approved": "Approved", "rejected": "Rejected", "expired": "Expired", "superseded": "Superseded"}
 MODE_RANK = {"lazy": 0, "democratic": 1, "owner1": 2, "owner2": 3}
 
 # Free models that run on the GitHub machine itself (no key, nothing leaves GitHub).
@@ -126,33 +134,104 @@ def env_config():
     return {"owners": owners, "ch": ch}
 
 
+def now_ms():
+    return int(time.time() * 1000)
+
+
+def snowflake(ms):
+    return str(max(0, int(ms) - DISCORD_EPOCH) << 22)
+
+
+def iso(ms):
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="milliseconds")
+
+
+def from_iso(s):
+    return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+
+
+def fmt_hours(h):
+    m = round(float(h) * 60)
+    return f"{m}m" if m % 60 else f"{m // 60}h"
+
+
+def fresh_settings():
+    return json.loads(json.dumps(DEFAULT_SETTINGS))
+
+
+def tier_line(s, t):
+    mx = s["tiers"][t]["max"]
+    size = f"up to {mx} lines" if mx is not None else "any size"
+    return f"**{TIER_NAME[t]}**: {size} · {fmt_hours(s['tiers'][t]['hours'])} vote · {MODE_NAME[TIER_MODE[t]]}"
+
+
+def settings_embed(s):
+    chunks, cur = [], ""
+    for v in s["voters"]:
+        if len(cur) + len(v) + 6 > 1000:
+            chunks.append(cur)
+            cur = ""
+        cur += (", " if cur else "") + f"<@{v}>"
+    chunks.append(cur or "None yet. Owners add them with `!usp voters add @name`.")
+    fields = [{"name": "Voters" if i == 0 else "Voters (more)", "value": c} for i, c in enumerate(chunks)]
+    fields += [{"name": "Size tiers", "value": "\n".join(tier_line(s, t) for t in TIER_ORDER)},
+               {"name": "AI model", "value": f"`{s['model']}`", "inline": True},
+               {"name": "@here in mod chat", "value": "On" if s["ping_here"] else "Off", "inline": True}]
+    return {"title": SETTINGS_TITLE, "color": 0x5865F2, "fields": fields,
+            "description": "Change these with `!usp` commands. `!usp help` lists them.",
+            "footer": {"text": "🟢 Online, replies instantly · last check" if s.get("live") else "Checks every 15 minutes · last check"},
+            "timestamp": iso(s["cursor"])}
+
+
+def parse_settings(e):
+    s = fresh_settings()
+    fields = e.get("fields", [])
+    f = {x["name"]: x["value"] for x in fields}
+    s["voters"] = [v for x in fields if x["name"].startswith("Voters") for v in re.findall(r"<@!?(\d+)>", x["value"])]
+    names = {v: k for k, v in TIER_NAME.items()}
+    for line in f.get("Size tiers", "").splitlines():
+        m = re.match(r"\*\*(.+?)\*\*: (?:up to (\d+) lines|any size) · (\S+) vote", line)
+        if m and m.group(1) in names and parse_hours(m.group(3)):
+            s["tiers"][names[m.group(1)]] = {"max": int(m.group(2)) if m.group(2) else None, "hours": round(parse_hours(m.group(3)), 4)}
+    if "AI model" in f:
+        s["model"] = f["AI model"].strip("` ")
+    s["ping_here"] = f.get("@here in mod chat", "Off").strip().lower() == "on"
+    s["cursor"] = from_iso(e["timestamp"]) if e.get("timestamp") else 0
+    s["live"] = (e.get("footer") or {}).get("text", "").startswith("🟢")
+    return s
+
+
 def load_settings(cfg):
     """Settings live in a bot message in the settings channel, so they change by command, not by file."""
     me = dc("GET", "/users/@me")["id"]
-    for m in dc("GET", f"/channels/{cfg['ch']['settings']}/messages?limit=100"):
-        if m["author"]["id"] == me and m["content"].startswith(SETTINGS_MARK):
-            body = m["content"].split("```json", 1)[1].rsplit("```", 1)[0]
-            s = json.loads(body)
-            merged = json.loads(json.dumps(DEFAULT_SETTINGS))
-            merged.update(s)
+    ch = cfg["ch"]["settings"]
+    for m in dc("GET", f"/channels/{ch}/messages?limit=100"):
+        if m["author"]["id"] != me:
+            continue
+        if m.get("embeds") and m["embeds"][0].get("title") == SETTINGS_TITLE:
+            return parse_settings(m["embeds"][0]), m["id"], me
+        if m["content"].startswith(SETTINGS_MARK):  # older plain-text version: turn it into the card
+            old = json.loads(m["content"].split("```json", 1)[1].rsplit("```", 1)[0])
+            s = fresh_settings()
+            s.update({k: old[k] for k in ("voters", "model", "ping_here") if k in old})
             for t in TIER_ORDER:
-                merged["tiers"][t] = {**DEFAULT_SETTINGS["tiers"][t], **s.get("tiers", {}).get(t, {})}
-            return merged, m["id"], me
-    s = json.loads(json.dumps(DEFAULT_SETTINGS))
-    msg = dc("POST", f"/channels/{cfg['ch']['settings']}/messages", {"content": render_settings(s), "allowed_mentions": {"parse": []}})
+                s["tiers"][t].update(old.get("tiers", {}).get(t, {}))
+            seen = [int(v) for v in old.get("last", {}).values() if str(v).isdigit() and int(v)]
+            s["cursor"] = ((min(seen) >> 22) + DISCORD_EPOCH) if seen else now_ms()
+            dc("PATCH", f"/channels/{ch}/messages/{m['id']}", {"content": "", "embeds": [settings_embed(s)]})
+            return s, m["id"], me
+    s = fresh_settings()
+    s["cursor"] = now_ms()
+    msg = dc("POST", f"/channels/{ch}/messages", {"embeds": [settings_embed(s)], "allowed_mentions": {"parse": []}})
     try:
-        dc("PUT", f"/channels/{cfg['ch']['settings']}/pins/{msg['id']}")
+        dc("PUT", f"/channels/{ch}/pins/{msg['id']}")
     except Exception:
         pass
     return s, msg["id"], me
 
 
-def render_settings(s):
-    return f"{SETTINGS_MARK} (managed by the bot; change with `!usp` commands, don't edit)\n```json\n{json.dumps(s, separators=(',', ':'))}\n```"
-
-
 def save_settings(cfg, s, sid):
-    dc("PATCH", f"/channels/{cfg['ch']['settings']}/messages/{sid}", {"content": render_settings(s)})
+    dc("PATCH", f"/channels/{cfg['ch']['settings']}/messages/{sid}", {"content": "", "embeds": [settings_embed(s)]})
 
 
 # --------------------------------------------------------------------------------------- model
@@ -339,15 +418,32 @@ Diff (may be cut short):
 
 # ---------------------------------------------------------------------------------------- cards
 
+def label(repo, pr):
+    return f"{'USP-tools' if repo.lower().endswith('usp-tools') else 'USP'} #{pr}"
+
+
 def footer(st):
-    return "|".join([CARD_MARK, st["repo"], str(st["pr"]), st["tier"], st["mode"], str(st["opened"]), str(st["deadline"]), st["state"]])
+    ends = "Vote ends" if st["state"] == "open" else "Vote ended"
+    return " · ".join([label(st["repo"], st["pr"]), TIER_NAME[st["tier"]], MODE_NAME[st["mode"]], STATE_NAME[st["state"]], ends])
 
 
-def parse_footer(text):
-    p = (text or "").split("|")
-    if len(p) != 8 or p[0] != CARD_MARK:
+def stamp_card(e, st):
+    """Writes the card's state into its embed: the footer words, the pull request link and the deadline."""
+    e["footer"] = {"text": footer(st)}
+    e["url"] = f"https://github.com/{st['repo']}/pull/{st['pr']}"
+    e["timestamp"] = iso(st["deadline"] * 1000)
+    e["color"] = COLOR.get(st["state"], COLOR["open"])
+
+
+def parse_card(e):
+    m = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", e.get("url") or "")
+    parts = (e.get("footer") or {}).get("text", "").split(" · ")
+    if not m or len(parts) != 5 or not e.get("timestamp"):
         return None
-    return {"repo": p[1], "pr": int(p[2]), "tier": p[3], "mode": p[4], "opened": int(p[5]), "deadline": int(p[6]), "state": p[7]}
+    rev = lambda names, word: next((k for k, v in names.items() if v == word), None)
+    st = {"repo": m.group(1), "pr": int(m.group(2)), "tier": rev(TIER_NAME, parts[1]), "mode": rev(MODE_NAME, parts[2]),
+          "state": rev(STATE_NAME, parts[3]), "deadline": from_iso(e["timestamp"]) // 1000}
+    return st if None not in st.values() else None
 
 
 def short(repo, pr):
@@ -399,20 +495,19 @@ def cmd_card():
     elif model is None:
         model_note = "Unknown model in settings; AI summary skipped"
 
-    now = int(time.time())
+    now = now_ms() // 1000
     hours = float(settings["tiers"][tier]["hours"])
-    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "opened": now, "deadline": now + int(hours * 3600), "state": "open"}
+    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + int(hours * 3600), "state": "open"}
 
     # retire older cards for the same pull request
     for m in dc("GET", f"/channels/{cfg['ch']['voting']}/messages?limit=100"):
         if m["author"]["id"] != me or not m.get("embeds"):
             continue
-        old = parse_footer(m["embeds"][0].get("footer", {}).get("text"))
-        if old and old["repo"] == repo and old["pr"] == num and old["state"] == "open":
+        old = parse_card(m["embeds"][0])
+        if old and old["repo"].lower() == repo.lower() and old["pr"] == num and old["state"] == "open":
             old["state"] = "superseded"
             e = m["embeds"][0]
-            e["footer"]["text"] = footer(old)
-            e["color"] = COLOR["superseded"]
+            stamp_card(e, old)
             e["title"] = "[superseded by new commits] " + e.get("title", "")[:220]
             dc("PATCH", f"/channels/{cfg['ch']['voting']}/messages/{m['id']}", {"embeds": [e]})
 
@@ -426,11 +521,9 @@ def cmd_card():
     embed = {
         "author": {"name": pr["user"]["login"], "icon_url": pr["user"]["avatar_url"], "url": pr["user"]["html_url"]},
         "title": f"[{repo}] Pull request #{num}: {pr['title']}"[:256],
-        "url": pr["html_url"],
         "description": desc[:4096],
-        "color": COLOR["open"],
-        "footer": {"text": footer(st)},
     }
+    stamp_card(embed, st)
     if model_note:
         embed["fields"] = [{"name": "Model", "value": model_note[:200], "inline": True}]
     card = dc("POST", f"/channels/{cfg['ch']['voting']}/messages", {"embeds": [embed], "allowed_mentions": {"parse": []}})
@@ -455,7 +548,7 @@ def ping_owners(cfg, text):
 
 # ----------------------------------------------------------------------------------------- tick
 
-HELP = """**USP bot commands** (prefix `!usp`, read every ~15 minutes)
+HELP = """**USP bot commands** (prefix `!usp`; instant while the bot is online, otherwise within 15 minutes)
 Anyone:
 • `!usp help` · `!usp status usp#12` · `!usp voters` · `!usp tiers` · `!usp model`
 Voters and owners:
@@ -530,8 +623,7 @@ def decide(cfg, settings, st, rx, now):
 
 def edit_card(cfg, m, st, extra=None):
     e = m["embeds"][0]
-    e["footer"]["text"] = footer(st)
-    e["color"] = COLOR.get(st["state"], COLOR["open"])
+    stamp_card(e, st)
     if extra:
         e["description"] = (e.get("description", "") + "\n\n" + extra)[:4096]
     dc("PATCH", f"/channels/{cfg['ch']['voting']}/messages/{m['id']}", {"embeds": [e]})
@@ -555,7 +647,7 @@ def find_cards(cfg, me):
     cards = []
     for m in dc("GET", f"/channels/{cfg['ch']['voting']}/messages?limit=100"):
         if m["author"]["id"] == me and m.get("embeds"):
-            st = parse_footer(m["embeds"][0].get("footer", {}).get("text"))
+            st = parse_card(m["embeds"][0])
             if st:
                 cards.append((m, st))
     return cards
@@ -666,56 +758,72 @@ def handle_command(cfg, settings, cards, msg, now):
     return "I didn't understand that. Try `!usp help`."
 
 
+def run_command(cfg, settings, cards, msg):
+    """Answers one !usp message. Returns True if it was a command."""
+    if msg["author"].get("bot") or not msg.get("content", "").lower().startswith("!usp"):
+        return False
+    try:
+        reply = handle_command(cfg, settings, cards, msg, now_ms() // 1000)
+    except Exception as e:
+        print(f"command failed: {type(e).__name__}")
+        reply = "Something went wrong running that command."
+    dc("POST", f"/channels/{msg['channel_id']}/messages", {"content": reply[:1990],
+       "message_reference": {"message_id": msg["id"], "fail_if_not_exists": False}, "allowed_mentions": {"parse": []}})
+    return True
+
+
+def read_commands(cfg, settings, cards, upto, seen=None):
+    """Answers commands sent after the settings cursor and up to `upto` (ms), then moves the cursor there."""
+    handled = 0
+    for ch in dict.fromkeys(cfg["ch"][k] for k in ("settings", "mod", "voting")):
+        msgs = dc("GET", f"/channels/{ch}/messages?limit=100&after={snowflake(settings['cursor'])}")
+        for msg in sorted(msgs, key=lambda x: int(x["id"])):
+            if int(msg["id"]) > int(snowflake(upto)) or (seen is not None and msg["id"] in seen):
+                continue
+            msg.setdefault("channel_id", ch)
+            if seen is not None:
+                seen.add(msg["id"])
+            handled += run_command(cfg, settings, cards, msg)
+    settings["cursor"] = max(settings["cursor"], upto)
+    return handled
+
+
+def check_card(cfg, settings, m, st, now):
+    """Applies the rules to one open card. Returns True if it was decided."""
+    state, reason = decide(cfg, settings, st, reactions(cfg, cfg["ch"]["voting"], m["id"]), now)
+    if state == "escalate":
+        st["mode"] = "owner1"
+        st["deadline"] = now + int(float(settings["tiers"]["large"]["hours"]) * 3600)
+        edit_card(cfg, m, st, f"➜ {reason}. Now: **{MODE_TEXT['owner1']}**, ends {ts(st['deadline'])}.")
+        ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.")
+    elif state:
+        st["state"] = state
+        edit_card(cfg, m, st, f"➜ **{state.upper()}**: {reason}.")
+        announce(cfg, m, st, state, reason)
+        return True
+    return False
+
+
+def check_cards(cfg, settings, cards):
+    now = now_ms() // 1000
+    return sum(check_card(cfg, settings, m, st, now) for m, st in cards if st["state"] == "open")
+
+
 def cmd_tick():
     cfg = env_config()
     if not cfg:
         print("Bot secrets are not set; skipping.")
         return
     settings, sid, me = load_settings(cfg)
-    before = json.dumps(settings, sort_keys=True)
-    now = int(time.time())
+    start = now_ms() - 5000  # newer messages wait for the next check, so none is missed
+    if settings["live"] and start - settings["cursor"] < LIVE_FRESH_MS:
+        print("tick: the live bot is online; nothing to do.")
+        return
     cards = find_cards(cfg, me)
-
-    handled = 0
-    for key in ("settings", "mod", "voting"):
-        ch = cfg["ch"][key]
-        last = settings["last"].get(ch)
-        if last is None:  # first run: start from now, don't replay history
-            latest = dc("GET", f"/channels/{ch}/messages?limit=1")
-            settings["last"][ch] = latest[0]["id"] if latest else "0"
-            continue
-        msgs = dc("GET", f"/channels/{ch}/messages?limit=100&after={last}")
-        for msg in sorted(msgs, key=lambda x: int(x["id"])):
-            settings["last"][ch] = msg["id"]
-            if msg["author"].get("bot") or not msg["content"].lower().startswith("!usp"):
-                continue
-            try:
-                reply = handle_command(cfg, settings, cards, msg, now)
-            except Exception as e:
-                print(f"command failed: {type(e).__name__}")
-                reply = "Something went wrong running that command."
-            dc("POST", f"/channels/{ch}/messages", {"content": reply[:1990],
-               "message_reference": {"message_id": msg["id"], "fail_if_not_exists": False}, "allowed_mentions": {"parse": []}})
-            handled += 1
-
-    decided = 0
-    for m, st in cards:
-        if st["state"] != "open":
-            continue
-        state, reason = decide(cfg, settings, st, reactions(cfg, cfg["ch"]["voting"], m["id"]), now)
-        if state == "escalate":
-            st["mode"] = "owner1"
-            st["deadline"] = now + int(float(settings["tiers"]["large"]["hours"]) * 3600)
-            edit_card(cfg, m, st, f"➜ {reason}. Now: **{MODE_TEXT['owner1']}**, ends {ts(st['deadline'])}.")
-            ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.")
-        elif state:
-            st["state"] = state
-            edit_card(cfg, m, st, f"➜ **{state.upper()}**: {reason}.")
-            announce(cfg, m, st, state, reason)
-            decided += 1
-
-    if json.dumps(settings, sort_keys=True) != before:
-        save_settings(cfg, settings, sid)
+    handled = read_commands(cfg, settings, cards, start)
+    decided = check_cards(cfg, settings, cards)
+    settings["live"] = False
+    save_settings(cfg, settings, sid)
     print(f"tick: {handled} command(s), {decided} decision(s)")
 
 
