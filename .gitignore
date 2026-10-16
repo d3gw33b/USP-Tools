@@ -1,0 +1,36 @@
+# Never commit the game or anything extracted from it.
+*.exe
+*.dll
+*.pak
+*.PAK
+*.mbin
+*.MBIN
+*.mbin.pc
+*.MBIN.PC
+*.csv
+*.s
+/game/
+# Local decomp, Ghidra projects, extracted data and symbol lists
+/local/
+*.gpr
+*.rep/
+# Recorded outputs of the game's own code: regenerate locally
+**/tests/vectors/
+/results/
+**/results/
+**/jobs/
+# Build output
+/target/
+**/target/
+__pycache__/
+*.pyc
+# Personal files: screenshots, recordings, secrets
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.mp4
+*.mkv
+.env
+*.key
+apikey*

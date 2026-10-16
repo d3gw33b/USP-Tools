@@ -1,0 +1,5 @@
+#!/bin/sh
+# Adds the contributor-agreement line to every commit message if it is missing.
+# Install once: git config core.hooksPath tools/hooks
+LINE='Agreed-to: CONTRIBUTING.md#contributor-agreement'
+grep -qx "$LINE" "$1" || printf '\n%s\n' "$LINE" >> "$1"
