@@ -36,8 +36,8 @@ DEFAULT_SETTINGS = {
     "voters": [],
     # max = largest number of changed lines (added + removed) for the tier; hours = vote timer
     "tiers": {
-        "tiny": {"max": 20, "hours": 0.5},
-        "small": {"max": 100, "hours": 0.75},
+        "tiny": {"max": 20, "hours": 0.0833},   # 5 minutes
+        "small": {"max": 100, "hours": 0.25},   # 15 minutes
         "medium": {"max": 500, "hours": 6},
         "large": {"max": 2000, "hours": 24},
         "very_large": {"max": None, "hours": 48},
@@ -201,6 +201,8 @@ def parse_settings(e):
         s["model"] = f["AI model"].strip("` ")
     s["ping_here"] = f.get("@here in mod chat", "Off").strip().lower() == "on"
     s["github_owners"] = re.findall(r"`([A-Za-z0-9-]+)`", f.get("Owner GitHub accounts (no vote needed)", ""))
+    if s["tiers"]["tiny"]["hours"] == 0.5 and s["tiers"]["small"]["hours"] == 0.75:  # the first defaults were too slow
+        s["tiers"]["tiny"]["hours"], s["tiers"]["small"]["hours"] = 0.0833, 0.25
     s["cursor"] = from_iso(e["timestamp"]) if e.get("timestamp") else 0
     s["live"] = (e.get("footer") or {}).get("text", "").startswith("🟢")
     return s
@@ -455,7 +457,7 @@ def short(repo, pr):
     return f"{'tools' if repo.lower().endswith('usp-tools') else 'usp'}#{pr}"
 
 
-MODE_TEXT = {"lazy": "passes when the timer ends unless more voters say ❌ than ✅",
+MODE_TEXT = {"lazy": "passes when the timer ends (or at once with an owner's ✅) unless more voters say ❌ than ✅",
              "democratic": "majority of the votes cast decides",
              "owner1": "needs one owner's ✅ (and no owner ❌)",
              "owner2": "needs both owners' ✅"}
@@ -504,7 +506,7 @@ def cmd_card():
     hours = float(settings["tiers"][tier]["hours"])
     author = pr["user"]["login"]
     by_owner = author.lower() in {g.lower() for g in settings["github_owners"] + [os.environ.get("GITHUB_REPOSITORY_OWNER", "")] if g}
-    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + int(hours * 3600), "state": "open"}
+    st = {"repo": repo, "pr": num, "tier": tier, "mode": mode, "deadline": now + round(hours * 60) * 60, "state": "open"}
     if by_owner:
         st.update(mode="none", state="owner", deadline=now)
 
@@ -630,6 +632,8 @@ def decide(cfg, settings, st, rx, now):
         if any(v == 1 for v in ov.values()):
             return "approved", "an owner approved"
         return ("expired", "timer ended without an owner approving") if now >= st["deadline"] else (None, None)
+    if mode == "lazy" and any(v == 1 for v in ov.values()):
+        return "approved", "an owner approved"
     if not ended:
         return None, None
     if mode == "democratic":
@@ -823,7 +827,7 @@ def check_card(cfg, settings, m, st, now):
     state, reason = decide(cfg, settings, st, reactions(cfg, cfg["ch"]["voting"], m["id"]), now)
     if state == "escalate":
         st["mode"] = "owner1"
-        st["deadline"] = now + int(float(settings["tiers"]["large"]["hours"]) * 3600)
+        st["deadline"] = now + round(float(settings["tiers"]["large"]["hours"]) * 60) * 60
         edit_card(cfg, m, st, f"➜ {reason}. Now: **{MODE_TEXT['owner1']}**, ends {ts(st['deadline'])}.")
         ping_owners(cfg, f"Nobody voted on **{short(st['repo'], st['pr'])}**; it needs an owner now.", m["id"])
     elif state:

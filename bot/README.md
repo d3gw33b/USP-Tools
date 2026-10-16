@@ -17,8 +17,8 @@ Settings are kept in a readable card the bot pins in the settings channel. Chang
 
 | Tier | Changed lines | Vote timer | Decided by |
 |---|---|---|---|
-| tiny | up to 20 | 30 min | passes unless more ❌ than ✅ (`!usp vote` makes it a majority vote) |
-| small | up to 100 | 45 min | same as tiny |
+| tiny | up to 20 | 5 min | passes unless more ❌ than ✅ (an owner's ✅ passes it at once) (`!usp vote` makes it a majority vote) |
+| small | up to 100 | 15 min | same as tiny |
 | medium | up to 500 | 6 h | majority of votes cast; no votes → owners |
 | large | up to 2000 | 24 h | one owner ✅ |
 | very large | more | 48 h | both owners ✅ |
