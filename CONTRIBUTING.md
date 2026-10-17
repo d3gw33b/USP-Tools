@@ -15,6 +15,12 @@ This adds the agreement line to every commit you make.
 3. Make sure `python -m py_compile` passes on the files you changed.
 4. Open a pull request. One maintainer approval is required before merge.
 
+## Working with an AI assistant
+
+You're welcome to use an AI assistant, Claude or another, to write a change. Use your own account or key on your own machine, and never commit one. Keys in a repo are public to anyone who can read it.
+
+Point the assistant at a clone, let it make a branch and its commits, then review the diff yourself before you open the pull request. You're responsible for what your assistant wrote, including the agreement above. Keep the same ground rules, so no game files or extracted data go into the assistant's prompts for a pull request.
+
 ## Ground rules
 
 - No game files, decompiled code, extracted data, or recorded outputs, in code, issues or pull requests.
