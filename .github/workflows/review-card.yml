@@ -23,10 +23,14 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GITHUB_TOKEN: ${{ github.token }}
     steps:
+      # The bot's code lives in the public USP-Bot repo.
       - uses: actions/checkout@v4
         with:
+          repository: d3gw33b/USP-Bot
+          ref: main
+          path: usp-bot
           sparse-checkout: bot
-      - run: echo "BOT=$GITHUB_WORKSPACE/bot" >> "$GITHUB_ENV"
+      - run: echo "BOT=$GITHUB_WORKSPACE/usp-bot/bot" >> "$GITHUB_ENV"
       - name: Pick the model
         id: model
         run: echo "id=$(python3 $BOT/usp_bot.py resolve-model)" >> "$GITHUB_OUTPUT"
