@@ -1,0 +1,30 @@
+# Copy into a project repo's .github/workflows/. Fails (and so shows a red mark on main) when a push to main
+# contains a commit that is not a merged pull request and changes more than WORK.md.
+# Board claims change only WORK.md, so they pass.
+name: board-guard
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/checkout@v4
+        with: { repository: d3gw33b/USP-tools, path: .usp-tools }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install "collaborative-ai-workboard @ git+https://github.com/ed-slopper/collaborative-ai-workboard@b7a0fc36be329dc1e6d16a1f2b00db74deaa6ffe"
+      - name: Only the board may be pushed straight to main
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if ! python .usp-tools/tools/board/usp_board.py guard --before "$BEFORE" --after "$AFTER"; then
+            echo "::error::Code was pushed straight to main instead of through a pull request (listed above)."
+            exit 1
+          fi

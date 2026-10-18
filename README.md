@@ -11,6 +11,7 @@ Public, general-purpose tools for working on a Windows executable's functions an
 | `tools/difftest/nmsemu.py` | Runs one function from a Windows `.exe` inside a small emulator (unicorn), so you can call it with your own inputs. |
 | `tools/difftest/asm.py` | Disassembles a function from a `.exe` and follows its jumps. Set `PE_EXE` to your file, and optionally `SYMBOL_CSV` to a symbol list you keep locally. |
 | `tools/hgpak.py` | Lists and extracts files from HGPAK archives. Needs `zstandard`. |
+| `tools/board/usp_board.py` | The shared to-do board (`WORK.md`) for many contributors, with work handed in through pull requests. See [tools/board/README.md](tools/board/README.md). |
 
 ## Setup
 
