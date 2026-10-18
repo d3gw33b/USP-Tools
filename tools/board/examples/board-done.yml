@@ -1,0 +1,37 @@
+# Copy into a project repo's .github/workflows/. When a pull request is merged, its rows move to Done on
+# WORK.md with the merge commit, and the gaps listed in its description become new rows.
+# pull_request_target runs this file from main, and the pull request's own code is never checked out.
+name: board-done
+on:
+  pull_request_target:
+    types: [closed]
+permissions:
+  contents: write  # pushes the one-file board commit to main
+concurrency:
+  group: board
+  cancel-in-progress: false
+jobs:
+  done:
+    if: github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/checkout@v4
+        with: { repository: d3gw33b/USP-tools, path: .usp-tools }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install "collaborative-ai-workboard @ git+https://github.com/ed-slopper/collaborative-ai-workboard@b7a0fc36be329dc1e6d16a1f2b00db74deaa6ffe"
+      - name: Move the rows to Done
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+          TITLE: ${{ github.event.pull_request.title }}
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          git config user.name "usp-board"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s' "$BODY" > "$RUNNER_TEMP/body.md"
+          python .usp-tools/tools/board/usp_board.py finish-pr --commit "$SHA" --body-file "$RUNNER_TEMP/body.md" \
+            --title "$TITLE" --pr "$PR" --who usp-board

@@ -3,3 +3,4 @@ capstone
 unicorn
 numpy
 zstandard
+collaborative-ai-workboard @ git+https://github.com/ed-slopper/collaborative-ai-workboard@b7a0fc36be329dc1e6d16a1f2b00db74deaa6ffe
